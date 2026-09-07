@@ -1,0 +1,14 @@
+build/
+bin/
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ilk
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*_protected.exe
+test/
