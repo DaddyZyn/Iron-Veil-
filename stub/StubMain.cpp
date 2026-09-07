@@ -100,10 +100,10 @@ namespace IronVeil {
                             uint8_t type = static_cast<uint8_t>(entry >> 12);
                             uint16_t offset = entry & 0x0FFF;
 
-                            if (type == 10) {
+                            if (type == IMAGE_REL_BASED_DIR64) {
                                 auto* pPatch = reinterpret_cast<uint64_t*>(pPage + offset);
                                 *pPatch += delta;
-                            } else if (type == 3) {
+                            } else if (type == IMAGE_REL_BASED_HIGHLOW) {
                                 auto* pPatch = reinterpret_cast<uint32_t*>(pPage + offset);
                                 *pPatch += static_cast<uint32_t>(delta);
                             }
