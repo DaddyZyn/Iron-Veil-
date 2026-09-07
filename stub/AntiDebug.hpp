@@ -44,17 +44,6 @@ namespace IronVeil {
             return false;
         }
 
-        static bool IsAddressInModule(uintptr_t addr, HMODULE hMod) {
-            if (!hMod || !addr) return false;
-            auto* base = reinterpret_cast<const uint8_t*>(hMod);
-            auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-            if (dos->e_magic != IMAGE_DOS_SIGNATURE) return false;
-            auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-            if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
-            uintptr_t modStart = reinterpret_cast<uintptr_t>(base);
-            uintptr_t modEnd = modStart + nt->OptionalHeader.SizeOfImage;
-            return (addr >= modStart && addr < modEnd);
-        }
 
         static bool IsFunctionHooked(const void* pFunc) {
             if (!pFunc) return false;
@@ -83,11 +72,7 @@ namespace IronVeil {
                 const auto* pTargetSlot = reinterpret_cast<const uintptr_t*>(b + instrLen + disp);
                 uintptr_t target = *pTargetSlot;
 
-                HMODULE hKb = DynamicResolver::FindModuleByHash(HashDJB2CaseInsensitive("kernelbase.dll"));
-                HMODULE hK32 = DynamicResolver::FindModuleByHash(HashDJB2CaseInsensitive("kernel32.dll"));
-                HMODULE hNt = DynamicResolver::FindModuleByHash(HashDJB2CaseInsensitive("ntdll.dll"));
-
-                if (!IsAddressInModule(target, hKb) && !IsAddressInModule(target, hK32) && !IsAddressInModule(target, hNt)) {
+                if (!DynamicResolver::IsAddressInAnyModule(target)) {
                     return true;
                 }
             }

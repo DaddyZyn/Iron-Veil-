@@ -139,8 +139,145 @@ namespace IronVeil {
             return nullptr;
         }
 
-        static FARPROC FindExportByHash(HMODULE hMod, uint32_t funcHash) {
-            if (!hMod)
+        static bool IsAddressInAnyModule(uintptr_t addr) {
+            if (!addr)
+                return false;
+            auto* peb = reinterpret_cast<uint8_t*>(__readgsqword(0x60));
+            if (!peb)
+                return false;
+            auto* ldr = *reinterpret_cast<uint8_t**>(peb + 0x18);
+            if (!ldr)
+                return false;
+            auto* head = reinterpret_cast<LIST_ENTRY*>(ldr + 0x20);
+            if (!head)
+                return false;
+
+            for (auto* curr = head->Flink; curr && curr != head; curr = curr->Flink) {
+                auto* entry = reinterpret_cast<uint8_t*>(curr) - 0x10;
+                uintptr_t base = *reinterpret_cast<uintptr_t*>(entry + 0x30);
+                uint32_t sizeOfImage = *reinterpret_cast<uint32_t*>(entry + 0x40);
+                if (base && sizeOfImage) {
+                    if (addr >= base && addr < base + sizeOfImage) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        static FARPROC FindExportByOrdinal(HMODULE hMod, uint16_t ordinal, int depth = 0) {
+            if (!hMod || depth > 5)
+                return nullptr;
+
+            auto* base = reinterpret_cast<uint8_t*>(hMod);
+            auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
+            if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+                return nullptr;
+
+            auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+            if (nt->Signature != IMAGE_NT_SIGNATURE)
+                return nullptr;
+
+            auto& expDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+            if (expDir.VirtualAddress == 0)
+                return nullptr;
+
+            auto* exports = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(base + expDir.VirtualAddress);
+            if (ordinal < exports->Base || ordinal >= exports->Base + exports->NumberOfFunctions)
+                return nullptr;
+
+            auto* functions = reinterpret_cast<uint32_t*>(base + exports->AddressOfFunctions);
+            uint32_t funcRva = functions[ordinal - exports->Base];
+            if (funcRva == 0)
+                return nullptr;
+
+            if (funcRva >= expDir.VirtualAddress && funcRva < expDir.VirtualAddress + expDir.Size) {
+                const char* forwarder = reinterpret_cast<const char*>(base + funcRva);
+                return ResolveForwarder(forwarder, depth + 1);
+            }
+
+            return reinterpret_cast<FARPROC>(base + funcRva);
+        }
+
+        static FARPROC ResolveForwarder(const char* forwarder, int depth = 0) {
+            if (!forwarder || depth > 5)
+                return nullptr;
+
+            const char* dot = nullptr;
+            for (const char* p = forwarder; *p; ++p) {
+                if (*p == '.') {
+                    dot = p;
+                    break;
+                }
+            }
+            if (!dot)
+                return nullptr;
+
+            size_t modLen = static_cast<size_t>(dot - forwarder);
+            if (modLen == 0 || modLen >= 60)
+                return nullptr;
+
+            char modName[64];
+            for (size_t i = 0; i < modLen; ++i) {
+                modName[i] = forwarder[i];
+            }
+            modName[modLen] = '\0';
+
+            char modWithDll[64];
+            for (size_t i = 0; i < modLen; ++i) {
+                modWithDll[i] = modName[i];
+            }
+            modWithDll[modLen] = '.';
+            modWithDll[modLen + 1] = 'd';
+            modWithDll[modLen + 2] = 'l';
+            modWithDll[modLen + 3] = 'l';
+            modWithDll[modLen + 4] = '\0';
+
+            HMODULE targetMod = FindModuleByHash(HashDJB2CaseInsensitive(modWithDll));
+            if (!targetMod) {
+                targetMod = FindModuleByHash(HashDJB2CaseInsensitive(modName));
+            }
+
+            const char* funcPart = dot + 1;
+            if (*funcPart == '\0')
+                return nullptr;
+
+            if (targetMod) {
+                if (*funcPart == '#') {
+                    uint16_t ord = 0;
+                    for (const char* p = funcPart + 1; *p >= '0' && *p <= '9'; ++p) {
+                        ord = ord * 10 + static_cast<uint16_t>(*p - '0');
+                    }
+                    return FindExportByOrdinal(targetMod, ord, depth);
+                } else {
+                    return FindExportByHash(targetMod, HashDJB2(funcPart), depth);
+                }
+            }
+
+            if (*funcPart != '#') {
+                uint32_t fHash = HashDJB2(funcPart);
+                HMODULE hKb = FindModuleByHash(HashDJB2CaseInsensitive("kernelbase.dll"));
+                if (hKb) {
+                    FARPROC p = FindExportByHash(hKb, fHash, depth);
+                    if (p) return p;
+                }
+                HMODULE hNt = FindModuleByHash(HashDJB2CaseInsensitive("ntdll.dll"));
+                if (hNt) {
+                    FARPROC p = FindExportByHash(hNt, fHash, depth);
+                    if (p) return p;
+                }
+                HMODULE hK32 = FindModuleByHash(HashDJB2CaseInsensitive("kernel32.dll"));
+                if (hK32) {
+                    FARPROC p = FindExportByHash(hK32, fHash, depth);
+                    if (p) return p;
+                }
+            }
+
+            return nullptr;
+        }
+
+        static FARPROC FindExportByHash(HMODULE hMod, uint32_t funcHash, int depth = 0) {
+            if (!hMod || depth > 5)
                 return nullptr;
 
             auto* base = reinterpret_cast<uint8_t*>(hMod);
@@ -165,7 +302,16 @@ namespace IronVeil {
                 const char* name = reinterpret_cast<const char*>(base + names[i]);
                 if (HashDJB2(name) == funcHash) {
                     uint16_t ord = ordinals[i];
-                    return reinterpret_cast<FARPROC>(base + functions[ord]);
+                    uint32_t funcRva = functions[ord];
+                    if (funcRva == 0)
+                        return nullptr;
+
+                    if (funcRva >= expDir.VirtualAddress && funcRva < expDir.VirtualAddress + expDir.Size) {
+                        const char* forwarder = reinterpret_cast<const char*>(base + funcRva);
+                        return ResolveForwarder(forwarder, depth + 1);
+                    }
+
+                    return reinterpret_cast<FARPROC>(base + funcRva);
                 }
             }
 

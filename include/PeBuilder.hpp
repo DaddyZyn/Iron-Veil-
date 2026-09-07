@@ -33,9 +33,14 @@ namespace IronVeil {
                                const std::vector<uint8_t>& encryptedRelocs,
                                const std::vector<uint8_t>& encryptedTls,
                                const std::vector<uint8_t>& encryptedPdata,
+                               const std::vector<uint8_t>& decoyImports,
                                uint32_t stubCodeAlignedSize,
                                std::vector<uint8_t>& outPayload,
                                uint32_t& outConfigOffsetInPayload);
+
+        bool BuildDecoyImports(uint32_t baseRva, std::vector<uint8_t>& outBlob,
+                               uint32_t& outImportDirRva, uint32_t& outImportDirSize,
+                               uint32_t& outIatRva, uint32_t& outIatSize);
 
         uint32_t AlignUp(uint32_t value, uint32_t alignment) const {
             return (value + alignment - 1) & ~(alignment - 1);

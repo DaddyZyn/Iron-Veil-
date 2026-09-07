@@ -250,6 +250,8 @@ namespace IronVeil {
             }
         }
 
+        uintptr_t realOep = imageBase + config->originalEntryPoint;
+
         if (config->antiDebugFlags & ANTIDEBUG_ANTI_DUMP) {
             auto* dosHeader = reinterpret_cast<IMAGE_DOS_HEADER*>(imageBase);
             if (dosHeader->e_magic == IMAGE_DOS_SIGNATURE && dosHeader->e_lfanew > 0) {
@@ -257,7 +259,6 @@ namespace IronVeil {
                 DWORD oldP = 0;
                 if (apis.VirtualProtect(reinterpret_cast<LPVOID>(imageBase), 4096, PAGE_READWRITE, &oldP)) {
                     dosHeader->e_magic = 0;
-                    dosHeader->e_lfanew = 0;
                     ntHeaders->Signature = 0;
                     ntHeaders->FileHeader.NumberOfSections = 0;
                     auto* secHeaders = IMAGE_FIRST_SECTION(ntHeaders);
@@ -271,7 +272,20 @@ namespace IronVeil {
             }
         }
 
-        return imageBase + config->originalEntryPoint;
+        DWORD cfgOldProtect = 0;
+        if (apis.VirtualProtect(config, sizeof(StubConfig), PAGE_READWRITE, &cfgOldProtect)) {
+            memset(config->encryptionKey, 0, sizeof(config->encryptionKey));
+            memset(config->encryptionNonce, 0, sizeof(config->encryptionNonce));
+            config->magic = 0;
+            config->version = 0;
+            config->originalEntryPoint = 0;
+            config->textHash = 0;
+            memset(config->sections, 0, sizeof(config->sections));
+            memset(config, 0, sizeof(StubConfig));
+            apis.VirtualProtect(config, sizeof(StubConfig), PAGE_NOACCESS, &cfgOldProtect);
+        }
+
+        return realOep;
     }
 
 }

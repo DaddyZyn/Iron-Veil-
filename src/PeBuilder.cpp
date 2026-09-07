@@ -56,6 +56,7 @@ namespace IronVeil {
                                      const std::vector<uint8_t>& encryptedRelocs,
                                      const std::vector<uint8_t>& encryptedTls,
                                      const std::vector<uint8_t>& encryptedPdata,
+                                     const std::vector<uint8_t>& decoyImports,
                                      uint32_t stubCodeAlignedSize,
                                      std::vector<uint8_t>& outPayload,
                                      uint32_t& outConfigOffsetInPayload) {
@@ -81,6 +82,95 @@ namespace IronVeil {
 
         while (outPayload.size() % 16 != 0) outPayload.push_back(0);
         outPayload.insert(outPayload.end(), encryptedPdata.begin(), encryptedPdata.end());
+
+        if (!decoyImports.empty()) {
+            while (outPayload.size() % 16 != 0) outPayload.push_back(0);
+            outPayload.insert(outPayload.end(), decoyImports.begin(), decoyImports.end());
+        }
+
+        return true;
+    }
+
+    bool PeBuilder::BuildDecoyImports(uint32_t baseRva, std::vector<uint8_t>& outBlob,
+                                      uint32_t& outImportDirRva, uint32_t& outImportDirSize,
+                                      uint32_t& outIatRva, uint32_t& outIatSize) {
+        outBlob.clear();
+
+        constexpr size_t descCount = 2;
+        constexpr size_t descTotalSize = descCount * sizeof(IMAGE_IMPORT_DESCRIPTOR);
+
+        constexpr size_t thunkCount = 4;
+        constexpr size_t thunkTotalSize = thunkCount * sizeof(uint64_t);
+
+        const char dllName[] = "KERNEL32.dll";
+        constexpr size_t dllNameSize = 13;
+
+        const char fn0[] = "GetSystemTimeAsFileTime";
+        const char fn1[] = "GetCurrentProcessId";
+        const char fn2[] = "QueryPerformanceCounter";
+
+        size_t fn0Size = 2 + strlen(fn0) + 1;
+        if (fn0Size % 2 != 0) fn0Size++;
+
+        size_t fn1Size = 2 + strlen(fn1) + 1;
+        if (fn1Size % 2 != 0) fn1Size++;
+
+        size_t fn2Size = 2 + strlen(fn2) + 1;
+        if (fn2Size % 2 != 0) fn2Size++;
+
+        uint32_t descOffset = 0;
+        uint32_t intOffset = static_cast<uint32_t>(descTotalSize);
+        uint32_t iatOffset = static_cast<uint32_t>(intOffset + thunkTotalSize);
+        uint32_t dllNameOffset = static_cast<uint32_t>(iatOffset + thunkTotalSize);
+
+        uint32_t namesOffset = dllNameOffset + static_cast<uint32_t>(dllNameSize);
+        if (namesOffset % 2 != 0) namesOffset++;
+
+        uint32_t fn0Offset = namesOffset;
+        uint32_t fn1Offset = fn0Offset + static_cast<uint32_t>(fn0Size);
+        uint32_t fn2Offset = fn1Offset + static_cast<uint32_t>(fn1Size);
+        uint32_t totalSize = fn2Offset + static_cast<uint32_t>(fn2Size);
+
+        while (totalSize % 16 != 0) totalSize++;
+
+        outBlob.resize(totalSize, 0);
+
+        auto* descriptors = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(outBlob.data() + descOffset);
+        descriptors[0].OriginalFirstThunk = baseRva + intOffset;
+        descriptors[0].TimeDateStamp = 0;
+        descriptors[0].ForwarderChain = 0;
+        descriptors[0].Name = baseRva + dllNameOffset;
+        descriptors[0].FirstThunk = baseRva + iatOffset;
+
+        auto* intTable = reinterpret_cast<uint64_t*>(outBlob.data() + intOffset);
+        auto* iatTable = reinterpret_cast<uint64_t*>(outBlob.data() + iatOffset);
+
+        intTable[0] = baseRva + fn0Offset;
+        intTable[1] = baseRva + fn1Offset;
+        intTable[2] = baseRva + fn2Offset;
+        intTable[3] = 0;
+
+        iatTable[0] = baseRva + fn0Offset;
+        iatTable[1] = baseRva + fn1Offset;
+        iatTable[2] = baseRva + fn2Offset;
+        iatTable[3] = 0;
+
+        memcpy(outBlob.data() + dllNameOffset, dllName, dllNameSize);
+
+        auto writeByName = [&](uint32_t off, const char* name) {
+            auto* p = outBlob.data() + off;
+            *reinterpret_cast<uint16_t*>(p) = 0;
+            memcpy(p + 2, name, strlen(name) + 1);
+        };
+
+        writeByName(fn0Offset, fn0);
+        writeByName(fn1Offset, fn1);
+        writeByName(fn2Offset, fn2);
+
+        outImportDirRva = baseRva + descOffset;
+        outImportDirSize = static_cast<uint32_t>(descTotalSize);
+        outIatRva = baseRva + iatOffset;
+        outIatSize = static_cast<uint32_t>(thunkTotalSize);
 
         return true;
     }
@@ -321,9 +411,22 @@ namespace IronVeil {
             while (currentOffset % 16 != 0) currentOffset++;
         }
 
+        std::vector<uint8_t> decoyBlob;
+        uint32_t decoyImportDirRva = 0;
+        uint32_t decoyImportDirSize = 0;
+        uint32_t decoyIatRva = 0;
+        uint32_t decoyIatSize = 0;
+
+        if (m_options.stripImports && m_options.addDecoyImports) {
+            uint32_t decoyBaseRva = guardVa + currentOffset;
+            BuildDecoyImports(decoyBaseRva, decoyBlob, decoyImportDirRva, decoyImportDirSize, decoyIatRva, decoyIatSize);
+            currentOffset += static_cast<uint32_t>(decoyBlob.size());
+            while (currentOffset % 16 != 0) currentOffset++;
+        }
+
         uint32_t cfgOffset = 0;
         std::vector<uint8_t> guardPayload;
-        CreateStubPayload(stubCode, config, encImportBlob, encRelocBlob, encTlsBlob, encPdataBlob, stubCodeAlignedSize, guardPayload, cfgOffset);
+        CreateStubPayload(stubCode, config, encImportBlob, encRelocBlob, encTlsBlob, encPdataBlob, decoyBlob, stubCodeAlignedSize, guardPayload, cfgOffset);
 
         uint32_t guardRawSize = AlignUp(static_cast<uint32_t>(guardPayload.size()), nt->OptionalHeader.FileAlignment);
         uint32_t guardVirtualSize = AlignUp(static_cast<uint32_t>(guardPayload.size()), nt->OptionalHeader.SectionAlignment);
@@ -341,7 +444,7 @@ namespace IronVeil {
         newSec.Misc.VirtualSize = guardVirtualSize;
         newSec.PointerToRawData = guardRawOffset;
         newSec.SizeOfRawData = guardRawSize;
-        newSec.Characteristics = IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_CNT_CODE;
+        newSec.Characteristics = IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_CNT_CODE;
 
         size_t secHeaderOffset = reinterpret_cast<uint8_t*>(&sections[nt->FileHeader.NumberOfSections]) - rawBuffer.data();
         if (secHeaderOffset + sizeof(IMAGE_SECTION_HEADER) > nt->OptionalHeader.SizeOfHeaders) {
@@ -354,6 +457,13 @@ namespace IronVeil {
 
         nt->OptionalHeader.AddressOfEntryPoint = guardVa + sizeof(StubConfig) + stubEpOffsetInText;
         nt->OptionalHeader.SizeOfImage = guardVa + guardVirtualSize;
+
+        if (m_options.stripImports && m_options.addDecoyImports && !decoyBlob.empty()) {
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress = decoyImportDirRva;
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size = decoyImportDirSize;
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT].VirtualAddress = decoyIatRva;
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IAT].Size = decoyIatSize;
+        }
 
         if (rawBuffer.size() < guardRawOffset) {
             rawBuffer.resize(guardRawOffset, 0);

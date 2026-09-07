@@ -285,24 +285,29 @@ namespace IronVeil {
             if (!returnAddress)
                 return false;
 
-            HMODULE hSelf = GetModuleHandleA(nullptr);
-            if (!hSelf)
+            auto* peb = reinterpret_cast<uint8_t*>(__readgsqword(0x60));
+            if (!peb)
                 return false;
 
-            auto* base = reinterpret_cast<const uint8_t*>(hSelf);
-            auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
-            if (dos->e_magic != IMAGE_DOS_SIGNATURE)
-                return true;
+            uintptr_t base = *reinterpret_cast<uintptr_t*>(peb + 0x10);
+            if (!base)
+                return false;
 
-            auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
-            if (nt->Signature != IMAGE_NT_SIGNATURE)
-                return true;
+            auto* ldr = *reinterpret_cast<uint8_t**>(peb + 0x18);
+            if (!ldr)
+                return false;
+
+            auto* head = reinterpret_cast<LIST_ENTRY*>(ldr + 0x20);
+            if (!head || !head->Flink)
+                return false;
+
+            auto* entry = reinterpret_cast<uint8_t*>(head->Flink) - 0x10;
+            uint32_t sizeOfImage = *reinterpret_cast<uint32_t*>(entry + 0x40);
+            if (sizeOfImage == 0)
+                return false;
 
             uintptr_t caller = reinterpret_cast<uintptr_t>(returnAddress);
-            uintptr_t modStart = reinterpret_cast<uintptr_t>(base);
-            uintptr_t modEnd = modStart + nt->OptionalHeader.SizeOfImage;
-
-            return (caller >= modStart && caller < modEnd);
+            return (caller >= base && caller < base + sizeOfImage);
         }
 
         static uint64_t HashFunction(const void* funcPtr, size_t length) {
