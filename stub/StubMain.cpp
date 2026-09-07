@@ -68,7 +68,7 @@ namespace IronVeil {
 
             DWORD oldProtect = 0;
             if (apis.VirtualProtect(pSection, sec.virtualSize, PAGE_READWRITE, &oldProtect)) {
-                ChaCha20::CryptInPlace(config->encryptionKey, config->encryptionNonce, 1 + i, 
+                ChaCha20::CryptInPlace(config->encryptionKey, sec.nonce, 0, 
                                        pSection, sec.rawSize);
             }
         }
@@ -79,7 +79,7 @@ namespace IronVeil {
                 uint8_t* encRelocs = reinterpret_cast<uint8_t*>(imageBase + config->relocTableRva);
                 DWORD oldProtect = 0;
                 if (apis.VirtualProtect(encRelocs, config->relocTableSize, PAGE_READWRITE, &oldProtect)) {
-                    ChaCha20::CryptInPlace(config->encryptionKey, config->encryptionNonce, 50,
+                    ChaCha20::CryptInPlace(config->encryptionKey, config->relocsNonce, 0,
                                            encRelocs, config->relocTableSize);
 
                     size_t relocOffset = 0;
@@ -127,7 +127,7 @@ namespace IronVeil {
 
             DWORD oldProtect = 0;
             if (apis.VirtualProtect(encImports, config->encryptedImportsSize, PAGE_READWRITE, &oldProtect)) {
-                ChaCha20::CryptInPlace(config->encryptionKey, config->encryptionNonce, 0,
+                ChaCha20::CryptInPlace(config->encryptionKey, config->importsNonce, 0,
                                        encImports, config->encryptedImportsSize);
 
                 size_t offset = 0;
@@ -197,7 +197,7 @@ namespace IronVeil {
             uint8_t* encTls = reinterpret_cast<uint8_t*>(imageBase + config->tlsCallbacksRva);
             DWORD oldProtect = 0;
             if (apis.VirtualProtect(encTls, tlsDataSize, PAGE_READWRITE, &oldProtect)) {
-                ChaCha20::CryptInPlace(config->encryptionKey, config->encryptionNonce, 60,
+                ChaCha20::CryptInPlace(config->encryptionKey, config->tlsNonce, 0,
                                        encTls, tlsDataSize);
 
                 const auto* cbRvas = reinterpret_cast<const uint32_t*>(encTls);
@@ -217,7 +217,7 @@ namespace IronVeil {
             uint8_t* encPdata = reinterpret_cast<uint8_t*>(imageBase + config->pdataRva);
             DWORD oldProtect = 0;
             if (apis.VirtualProtect(encPdata, config->pdataSize, PAGE_READWRITE, &oldProtect)) {
-                ChaCha20::CryptInPlace(config->encryptionKey, config->encryptionNonce, 70,
+                ChaCha20::CryptInPlace(config->encryptionKey, config->pdataNonce, 0,
                                        encPdata, config->pdataSize);
                 if (apis.RtlAddFunctionTable) {
                     apis.RtlAddFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(encPdata),
@@ -275,7 +275,10 @@ namespace IronVeil {
         DWORD cfgOldProtect = 0;
         if (apis.VirtualProtect(config, sizeof(StubConfig), PAGE_READWRITE, &cfgOldProtect)) {
             memset(config->encryptionKey, 0, sizeof(config->encryptionKey));
-            memset(config->encryptionNonce, 0, sizeof(config->encryptionNonce));
+            memset(config->importsNonce, 0, sizeof(config->importsNonce));
+            memset(config->relocsNonce, 0, sizeof(config->relocsNonce));
+            memset(config->tlsNonce, 0, sizeof(config->tlsNonce));
+            memset(config->pdataNonce, 0, sizeof(config->pdataNonce));
             config->magic = 0;
             config->version = 0;
             config->originalEntryPoint = 0;

@@ -57,6 +57,7 @@ namespace IronVeil {
                                      const std::vector<uint8_t>& encryptedTls,
                                      const std::vector<uint8_t>& encryptedPdata,
                                      const std::vector<uint8_t>& decoyImports,
+                                     uint32_t configAlignedSize,
                                      uint32_t stubCodeAlignedSize,
                                      std::vector<uint8_t>& outPayload,
                                      uint32_t& outConfigOffsetInPayload) {
@@ -65,6 +66,10 @@ namespace IronVeil {
 
         const auto* cfgBytes = reinterpret_cast<const uint8_t*>(&config);
         outPayload.insert(outPayload.end(), cfgBytes, cfgBytes + sizeof(StubConfig));
+
+        if (outPayload.size() < configAlignedSize) {
+            outPayload.resize(configAlignedSize, 0);
+        }
 
         outPayload.insert(outPayload.end(), stubCode.begin(), stubCode.end());
 
@@ -236,37 +241,39 @@ namespace IronVeil {
             }
         }
 
-        uint8_t encKey[32] = { 0 };
-        uint8_t encNonce[12] = { 0 };
-        CryptoUtils::GenerateRandomBytes(encKey, sizeof(encKey));
-        CryptoUtils::GenerateRandomBytes(encNonce, sizeof(encNonce));
-
-        std::vector<uint8_t> encImportBlob(importBlob.size());
-        ChaCha20::Process(encKey, encNonce, 0, importBlob.data(), encImportBlob.data(), importBlob.size());
-
-        std::vector<uint8_t> encRelocBlob(relocBlob.size());
-        if (!relocBlob.empty()) {
-            ChaCha20::Process(encKey, encNonce, 50, relocBlob.data(), encRelocBlob.data(), relocBlob.size());
-        }
-
-        std::vector<uint8_t> encTlsBlob(tlsBlob.size());
-        if (!tlsBlob.empty()) {
-            ChaCha20::Process(encKey, encNonce, 60, tlsBlob.data(), encTlsBlob.data(), tlsBlob.size());
-        }
-
-        std::vector<uint8_t> encPdataBlob(pdataBlob.size());
-        if (!pdataBlob.empty()) {
-            ChaCha20::Process(encKey, encNonce, 70, pdataBlob.data(), encPdataBlob.data(), pdataBlob.size());
-        }
-
         StubConfig config = { 0 };
         config.magic = STUB_MAGIC;
         config.version = STUB_VERSION;
         config.originalEntryPoint = nt->OptionalHeader.AddressOfEntryPoint;
         config.originalImageBase = nt->OptionalHeader.ImageBase;
-        memcpy(config.encryptionKey, encKey, 32);
-        memcpy(config.encryptionNonce, encNonce, 12);
         config.antiDebugFlags = m_options.antiDebugFlags;
+
+        uint8_t encKey[32] = { 0 };
+        CryptoUtils::GenerateRandomBytes(encKey, sizeof(encKey));
+        memcpy(config.encryptionKey, encKey, 32);
+
+        CryptoUtils::GenerateRandomBytes(config.importsNonce, sizeof(config.importsNonce));
+        CryptoUtils::GenerateRandomBytes(config.relocsNonce, sizeof(config.relocsNonce));
+        CryptoUtils::GenerateRandomBytes(config.tlsNonce, sizeof(config.tlsNonce));
+        CryptoUtils::GenerateRandomBytes(config.pdataNonce, sizeof(config.pdataNonce));
+
+        std::vector<uint8_t> encImportBlob(importBlob.size());
+        ChaCha20::Process(encKey, config.importsNonce, 0, importBlob.data(), encImportBlob.data(), importBlob.size());
+
+        std::vector<uint8_t> encRelocBlob(relocBlob.size());
+        if (!relocBlob.empty()) {
+            ChaCha20::Process(encKey, config.relocsNonce, 0, relocBlob.data(), encRelocBlob.data(), relocBlob.size());
+        }
+
+        std::vector<uint8_t> encTlsBlob(tlsBlob.size());
+        if (!tlsBlob.empty()) {
+            ChaCha20::Process(encKey, config.tlsNonce, 0, tlsBlob.data(), encTlsBlob.data(), tlsBlob.size());
+        }
+
+        std::vector<uint8_t> encPdataBlob(pdataBlob.size());
+        if (!pdataBlob.empty()) {
+            ChaCha20::Process(encKey, config.pdataNonce, 0, pdataBlob.data(), encPdataBlob.data(), pdataBlob.size());
+        }
 
         auto* sections = m_parser.GetSectionHeaders();
         uint32_t protectedCount = 0;
@@ -303,8 +310,9 @@ namespace IronVeil {
                     config.textHash = HashFNV1a64(pRawCode, sec.SizeOfRawData);
                 }
 
+                CryptoUtils::GenerateRandomBytes(secInfo.nonce, sizeof(secInfo.nonce));
                 std::cout << "[+] Encrypting section: " << secName << " (" << sec.SizeOfRawData / 1024 << " KB)..." << std::endl;
-                ChaCha20::CryptInPlace(encKey, encNonce, 1 + protectedCount, 
+                ChaCha20::CryptInPlace(encKey, secInfo.nonce, 0, 
                                        rawBuffer.data() + sec.PointerToRawData, sec.SizeOfRawData);
 
                 sec.Characteristics |= IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
@@ -381,7 +389,8 @@ namespace IronVeil {
         uint32_t guardVa = AlignUp(lastSec->VirtualAddress + lastSec->Misc.VirtualSize, nt->OptionalHeader.SectionAlignment);
         uint32_t guardRawOffset = AlignUp(static_cast<uint32_t>(rawBuffer.size()), nt->OptionalHeader.FileAlignment);
 
-        uint32_t stubCodeAlignedSize = AlignUp(static_cast<uint32_t>(sizeof(StubConfig) + stubCode.size()), nt->OptionalHeader.SectionAlignment);
+        uint32_t configAlignedSize = AlignUp(static_cast<uint32_t>(sizeof(StubConfig)), nt->OptionalHeader.SectionAlignment);
+        uint32_t stubCodeAlignedSize = AlignUp(configAlignedSize + static_cast<uint32_t>(stubCode.size()), nt->OptionalHeader.SectionAlignment);
 
         config.encryptedImportsRva = guardVa + stubCodeAlignedSize;
         config.encryptedImportsSize = static_cast<uint32_t>(encImportBlob.size());
@@ -426,7 +435,7 @@ namespace IronVeil {
 
         uint32_t cfgOffset = 0;
         std::vector<uint8_t> guardPayload;
-        CreateStubPayload(stubCode, config, encImportBlob, encRelocBlob, encTlsBlob, encPdataBlob, decoyBlob, stubCodeAlignedSize, guardPayload, cfgOffset);
+        CreateStubPayload(stubCode, config, encImportBlob, encRelocBlob, encTlsBlob, encPdataBlob, decoyBlob, configAlignedSize, stubCodeAlignedSize, guardPayload, cfgOffset);
 
         uint32_t guardRawSize = AlignUp(static_cast<uint32_t>(guardPayload.size()), nt->OptionalHeader.FileAlignment);
         uint32_t guardVirtualSize = AlignUp(static_cast<uint32_t>(guardPayload.size()), nt->OptionalHeader.SectionAlignment);
@@ -444,7 +453,7 @@ namespace IronVeil {
         newSec.Misc.VirtualSize = guardVirtualSize;
         newSec.PointerToRawData = guardRawOffset;
         newSec.SizeOfRawData = guardRawSize;
-        newSec.Characteristics = IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_CNT_CODE;
+        newSec.Characteristics = IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_CNT_CODE;
 
         size_t secHeaderOffset = reinterpret_cast<uint8_t*>(&sections[nt->FileHeader.NumberOfSections]) - rawBuffer.data();
         if (secHeaderOffset + sizeof(IMAGE_SECTION_HEADER) > nt->OptionalHeader.SizeOfHeaders) {
@@ -455,7 +464,7 @@ namespace IronVeil {
         memcpy(rawBuffer.data() + secHeaderOffset, &newSec, sizeof(IMAGE_SECTION_HEADER));
         nt->FileHeader.NumberOfSections++;
 
-        nt->OptionalHeader.AddressOfEntryPoint = guardVa + sizeof(StubConfig) + stubEpOffsetInText;
+        nt->OptionalHeader.AddressOfEntryPoint = guardVa + configAlignedSize + stubEpOffsetInText;
         nt->OptionalHeader.SizeOfImage = guardVa + guardVirtualSize;
 
         if (m_options.stripImports && m_options.addDecoyImports && !decoyBlob.empty()) {

@@ -41,6 +41,7 @@ namespace IronVeil {
         uint32_t rawSize;
         uint32_t originalProtect;
         uint32_t characteristics;
+        uint8_t  nonce[12];
     };
 
     struct StubConfig {
@@ -60,7 +61,10 @@ namespace IronVeil {
         uint32_t pdataEntryCount;
         uint64_t textHash;
         uint8_t  encryptionKey[32];
-        uint8_t  encryptionNonce[16];
+        uint8_t  importsNonce[12];
+        uint8_t  relocsNonce[12];
+        uint8_t  tlsNonce[12];
+        uint8_t  pdataNonce[12];
         uint32_t antiDebugFlags;
         ProtectedSectionInfo sections[16];
     };
