@@ -60,23 +60,21 @@ namespace IronVeil {
             if (!pFunc) return false;
             const auto* b = static_cast<const uint8_t*>(pFunc);
 
-            if (b[0] == 0xE9 || b[0] == 0xEB || b[0] == 0xCC || b[0] == 0xE8)
+            if (b[0] == 0xE9 || b[0] == 0xCC)
                 return true;
 
             if (b[0] == 0xCD && b[1] == 0x03)
                 return true;
 
-            if (b[0] == 0x48 && (b[1] == 0xB8 || b[1] == 0xBA || b[1] == 0xB9 || b[1] == 0xBB))
-                return true;
+            if (b[0] == 0x48 && b[1] == 0xB8) {
+                if (b[10] == 0xFF && (b[11] == 0xE0 || b[11] == 0xE1))
+                    return true;
+            }
 
-            if (b[0] == 0x49 && (b[1] == 0xBA || b[1] == 0xBB || b[1] == 0xB8 || b[1] == 0xB9))
-                return true;
-
-            if (b[0] == 0x68)
-                return true;
-
-            if (b[0] == 0x0F && b[1] == 0x0B)
-                return true;
+            if (b[0] == 0x49 && b[1] == 0xBA) {
+                if (b[10] == 0x41 && b[11] == 0xFF && (b[12] == 0xE2 || b[12] == 0xE3))
+                    return true;
+            }
 
             if ((b[0] == 0xFF && b[1] == 0x25) || (b[0] == 0x48 && b[1] == 0xFF && b[2] == 0x25)) {
                 size_t dispOffset = (b[0] == 0x48) ? 3 : 2;
@@ -130,7 +128,7 @@ namespace IronVeil {
             auto isSyscallTampered = [](const void* pFunc) -> bool {
                 if (!pFunc) return false;
                 const auto* b = static_cast<const uint8_t*>(pFunc);
-                if (b[0] != 0x4C || b[1] != 0x8B || b[2] != 0xD1 || b[3] != 0xB8)
+                if (b[0] == 0xE9 || b[0] == 0xCC || (b[0] == 0xFF && b[1] == 0x25))
                     return true;
                 return false;
             };
@@ -209,11 +207,9 @@ namespace IronVeil {
 
         static bool CheckKUserSharedData() {
             const auto* kuser = reinterpret_cast<const uint8_t*>(0x7FFE0000);
-            uint8_t kdFlags = kuser[0x2D4];
-            if (kdFlags & 0x01) {
-                return true;
-            }
-            return false;
+            bool kdEnabled = (kuser[0x2D4] & 0x01) != 0;
+            bool kdNotPresent = (kuser[0x2D5] & 0x01) != 0;
+            return (kdEnabled && !kdNotPresent);
         }
 
         struct SYSTEM_KERNEL_DEBUGGER_INFORMATION {
@@ -252,10 +248,8 @@ namespace IronVeil {
                 uint32_t flags = *reinterpret_cast<uint32_t*>(processHeap + 0x70);
                 uint32_t forceFlags = *reinterpret_cast<uint32_t*>(processHeap + 0x74);
 
-                if ((flags & ~0x00000002) != 0 && forceFlags != 0) {
-                    if (forceFlags != 0)
-                        return true;
-                }
+                if (forceFlags != 0 || (flags & 0x40000060) != 0)
+                    return true;
             }
 
             return false;
@@ -308,23 +302,18 @@ namespace IronVeil {
         }
 
         static bool CheckTiming() {
-            uint64_t start = __rdtsc();
-            volatile int dummy = 0;
-            for (int i = 0; i < 100; ++i) {
-                dummy += i;
+            uint64_t minCycles = static_cast<uint64_t>(-1);
+            for (int i = 0; i < 5; ++i) {
+                unsigned int aux = 0;
+                uint64_t t1 = __rdtscp(&aux);
+                _mm_pause();
+                uint64_t t2 = __rdtscp(&aux);
+                uint64_t diff = t2 - t1;
+                if (diff < minCycles) {
+                    minCycles = diff;
+                }
             }
-            uint64_t delta1 = __rdtsc() - start;
-
-            start = __rdtsc();
-            for (int i = 0; i < 100; ++i) {
-                dummy ^= i;
-            }
-            uint64_t delta2 = __rdtsc() - start;
-
-            if (delta1 > 500000 || delta2 > 500000)
-                return true;
-
-            return false;
+            return (minCycles > 0x10000);
         }
 
         static void CloakCurrentThread(const ResolvedApis& apis) {

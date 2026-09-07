@@ -8,6 +8,10 @@
 
 IronVeil is a native, production-grade 64-bit Windows PE (Portable Executable) binary protector and anti-tamper runtime engine. Engineered specifically for high-assurance reverse engineering mitigation without tripping heuristic or false-positive alarms, IronVeil rejects legacy packing clichés (such as RWX memory pages and noisy kernel-driver dependencies) in favor of **strict $W \oplus X$ memory semantics**, **freestanding CRT-less stub architecture**, and **hardware/kernel-grade anti-analysis telemetry**.
 
+> [!NOTE]
+> **Attribution & Transparency Notice**:
+> The README documentation, architectural write-ups, and markdown diagrams in this repository were structured and documented with the assistance of AI. The entire C++17 and MASM x64 codebase, engine architecture, anti-tamper logic, PE parser/builder, and low-level unpacking mechanics were handcrafted, designed, and implemented directly by the author (**Draxo.dev** / **DaddyZyn**).
+
 ---
 
 ## High-Level Architecture & Lifecycle
@@ -115,15 +119,13 @@ flowchart TD
 #### Detailed Mitigation Strategies:
 1. **NTAPI Inline Hook & Trampoline Detection**: Proactively inspects the entry opcodes of critical NT exports (`NtQueryInformationProcess`, `NtSetInformationThread`, `VirtualProtect`) to detect userland interception trampolines commonly installed by analysis harnesses (ScyllaHide, MinHook, Frida, Detours):
    - `0xE9` (JMP rel32)
-   - `0xEB` (JMP rel8)
-   - `0xCC` (INT 3)
-   - `0xFF 0x25` (JMP QWORD PTR [RIP+disp32])
-   - `0x48 0xB8` (MOV RAX, imm64; JMP RAX)
-   - `0x68 ... 0xC3` (PUSH imm32; RET)
-2. **KUSER_SHARED_DATA Inspection**: Directly queries user-mode shared kernel page `0x7FFE02D4` (`KdDebuggerEnabled`). Because this read is a direct memory dereference without API calls, it cannot be intercepted by userland hook frameworks.
+   - `0xCC` (INT 3 breakpoint)
+   - `0xFF 0x25` (JMP QWORD PTR [RIP+disp32] pointing outside module boundaries)
+   - `0x48 0xB8 ... 0xFF 0xE0` (MOV RAX, imm64; JMP RAX absolute detour)
+2. **KUSER_SHARED_DATA Inspection**: Directly queries user-mode shared kernel page `0x7FFE02D4` (`KdDebuggerEnabled`) while validating `0x7FFE02D5` (`KdDebuggerNotPresent`). Because this read is a direct memory dereference without API calls, it cannot be intercepted by userland hook frameworks, while dual-checking prevents false alarms under Hyper-V or test-signing configurations.
 3. **Kernel Debugger Telemetry**: Dynamically queries `NtQuerySystemInformation` with `SystemKernelDebuggerInformation` (`0x23` / 35), exposing ring-0 kernel debugger attachments (WinDbg, KD).
 4. **Hardware Breakpoint Disarming**: Obtains thread context and scans debug registers (`DR0`, `DR1`, `DR2`, `DR3`, `DR6`, `DR7`). Any active hardware breakpoint triggers immediate termination.
-5. **Calibrated RDTSC Timing Delta**: Measures clock cycle differentials across core routines using `__rdtsc` to identify human single-stepping and automated emulator instruction tracing latencies.
+5. **Multi-Sample RDTSCP Jitter Profiler**: Measures clock cycle differentials using serialized `__rdtscp` across multiple passes and evaluates the minimum delta. This rejects OS scheduler thread-switch outliers in high-load and virtualized production environments while reliably detecting human single-stepping and debugger stepping traps.
 6. **FNV-1a In-Memory Code Watchdog**: Computes a clean-room 64-bit FNV-1a hash over the decrypted code space and compares it against the build-time reference hash, neutralizing inline patches or software breakpoints injected during unpacking.
 
 ---
