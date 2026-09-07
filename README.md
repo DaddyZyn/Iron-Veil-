@@ -178,6 +178,59 @@ sequenceDiagram
 
 ---
 
+### 5. Advanced Obfuscation: MBA, Opaque Invariants & Instruction Virtualization (IronVM)
+
+Rather than inflating binary footprints with superficial dead-code sequences or compiler-fragile junk instructions, IronVeil integrates mathematically rigorous code transformation and virtualization primitives:
+
+```mermaid
+flowchart LR
+    Source["High-Value Routine<br/>(C++ Logic)"] --> Choice{"Obfuscation<br/>Strategy"}
+    Choice -->|Arithmetic| MBA["Mixed Boolean-Arithmetic<br/>Linear & Polynomial<br/>Eliminates Plain Opcodes"]
+    Choice -->|Control Flow| Opaque["Algebraic Opaque Predicates<br/>Polynomial Invariants<br/>Opaque Branch Splitting"]
+    Choice -->|Critical Logic| VM["IronVM Virtualization<br/>Dynamic Bytecode Engine<br/>Rolling Stream Crypt"]
+    MBA --> Hardened["Hardened Native Output<br/>Decompiler Resistant"]
+    Opaque --> Hardened
+    VM --> Hardened
+```
+
+- **Mixed Boolean-Arithmetic (MBA)**: Rewrites arithmetic and logic expressions (`+`, `-`, `^`, `&`, `|`) into mathematically proven polynomial and boolean combinations. For example, standard addition is rewritten as $x + y = (x \oplus y) + 2(x \land y)$, and subtraction as $x - y = (x \oplus y) - 2(\neg x \land y)$. These substitutions destroy algebraic clarity in decompilers (IDA Pro, Ghidra) and defeat linear SMT simplification without incurring runtime overhead.
+- **Algebraic Opaque Predicates**: Introduces control flow branches governed by mathematical invariants that are unconditionally true or false at runtime, but appear dynamically variable to static disassembly engines:
+  - Polynomial Invariant: $\forall x \in \mathbb{Z}, \; (x(x + 1)) \pmod 2 \equiv 0$ (guaranteed even).
+  - Modulo Invariant: $\forall x \in \mathbb{Z}, \; (x^3 - x) \pmod 3 \equiv 0$.
+  - Enables conditional branch splitting (`IV_OPAQUE_SPLIT`) where genuine logic and bogus code paths are indistinguishable during control flow graph (CFG) reconstruction.
+- **IronVM Lightweight Instruction Virtualizer**: A freestanding virtual machine that compiles and interprets proprietary bytecode sequences:
+  - 8 general-purpose 64-bit virtual registers (`VREG0`–`VREG7`), virtual flags, and a dedicated execution stack.
+  - Dynamic rolling stream encryption: Every instruction opcode and operand is encrypted in memory and decrypted cycle-by-cycle using an ephemeral PRNG schedule ($K_{n+1} = (33 \cdot K_n + 7) \pmod{256}$), scrubbing plaintext bytecode immediately after execution.
+  - Native x64 opcodes are completely eliminated from critical paths; reverse engineers only observe calls into the virtual interpreter loop.
+
+---
+
+### 6. Compiler Optimization Dynamics & Anti-Dead-Code Configuration
+
+Modern optimizing compilers (MSVC under `/O2`, `/Ox`, `/GL`, and `/Gy`) execute aggressive Dead Store Elimination (DSE) and Dead Code Elimination (DCE). Naive junk code loops or unreferenced operations are pruned from the final binary if the optimizer proves they lack observable side effects.
+
+IronVeil guarantees obfuscation survival under aggressive optimization through four complementary mechanisms:
+
+1. **Hardware Segment Intrinsics**: Obfuscation seeds are bound to hardware-level CPU segment queries (`__readgsqword(0x30)` for TEB and `0x60` for PEB) and volatile architectural pointers (`_AddressOfReturnAddress()`). The compiler treats segment register reads as volatile external state that cannot be folded or predicted at compile time.
+2. **Volatile-Qualified State**: Memory accesses across obfuscation buffers use `volatile` qualification and memory fences, enforcing strict evaluation ordering.
+3. **Selective Optimization Pragma Fencing**: Anti-tamper and license verification routines can be shielded with `IV_NO_OPTIMIZE_BEGIN` (`#pragma optimize("", off)`) and `IV_NO_OPTIMIZE_END` (`#pragma optimize("", on)`), forcing MSVC to generate literal instruction sequences without elision.
+4. **Data-Flow Entanglement**: MBA and IronVM transformations are directly bound to the program's calculation results and return values. Because the computed values are required downstream by legitimate program logic, the compiler's data-flow analysis cannot strip the transformations.
+
+#### Recommended Visual Studio Project Settings
+
+When compiling client applications protected with IronVeil or embedding `IronVeilAuth.hpp` / `IronVM.hpp`:
+
+| Setting | MSVC Flag | Recommended Value | Rationale |
+| :--- | :--- | :--- | :--- |
+| **Optimization** | `/O2` or `/Ox` | Maximize Speed | Safe for MBA and IronVM; high runtime throughput |
+| **Volatile Semantics** | `/volatile:ms` | Standard MSVC | Guarantees acquire/release barrier semantics |
+| **Whole Program Optimization** | `/GL` | Enabled | Whole-program optimization preserved |
+| **Inline Function Expansion** | `/Ob2` | Any Suitable | Inlines MBA templates directly into call sites |
+| **Security Checks** | `/GS-` | Disabled (for Stubs) | Removes CRT cookie references for standalone stubs |
+| **Control Flow Guard** | `/guard:cf-` | Disabled (for Stubs) | Prevents CFG bitmap checks from interfering with dynamic OEP jump |
+
+---
+
 ## Directory Structure
 
 ```
@@ -189,6 +242,8 @@ IronVeil/
 ├── include/
 │   ├── Common.hpp              # Core structs, StubConfig, hashes, and section descriptors
 │   ├── Encryptor.hpp           # 256-bit ChaCha20 stream cipher & PRNG definitions
+│   ├── IronVeilAuth.hpp        # Client-side MBA, opaque predicates, and ephemeral string protection
+│   ├── IronVM.hpp              # Freestanding bytecode instruction virtualizer
 │   ├── PeBuilder.hpp           # PE modification, section injection, and stub packing engine
 │   └── PeParser.hpp            # Raw PE32+ header parsing and IAT extraction
 ├── src/

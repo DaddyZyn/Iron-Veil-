@@ -6,7 +6,12 @@
 #include <string>
 #include <array>
 #include <utility>
+#include <type_traits>
 #include <intrin.h>
+#include "IronVM.hpp"
+
+#define IV_NO_OPTIMIZE_BEGIN __pragma(optimize("", off))
+#define IV_NO_OPTIMIZE_END   __pragma(optimize("", on))
 
 namespace IronVeil {
 
@@ -167,25 +172,105 @@ namespace IronVeil {
         uint8_t m_data[N] = { 0 };
     };
 
+    namespace MBA {
+        template <typename T1, typename T2>
+        __forceinline constexpr auto Add(T1 a, T2 b) {
+            using Common = std::common_type_t<T1, T2>;
+            Common ca = static_cast<Common>(a);
+            Common cb = static_cast<Common>(b);
+            return static_cast<Common>((ca ^ cb) + static_cast<Common>(static_cast<Common>(ca & cb) << 1));
+        }
+
+        template <typename T1, typename T2>
+        __forceinline constexpr auto Sub(T1 a, T2 b) {
+            using Common = std::common_type_t<T1, T2>;
+            Common ca = static_cast<Common>(a);
+            Common cb = static_cast<Common>(b);
+            return static_cast<Common>((ca ^ cb) - static_cast<Common>(static_cast<Common>(~ca & cb) << 1));
+        }
+
+        template <typename T1, typename T2>
+        __forceinline constexpr auto Xor(T1 a, T2 b) {
+            using Common = std::common_type_t<T1, T2>;
+            Common ca = static_cast<Common>(a);
+            Common cb = static_cast<Common>(b);
+            return static_cast<Common>((ca | cb) - (ca & cb));
+        }
+
+        template <typename T1, typename T2>
+        __forceinline constexpr auto And(T1 a, T2 b) {
+            using Common = std::common_type_t<T1, T2>;
+            Common ca = static_cast<Common>(a);
+            Common cb = static_cast<Common>(b);
+            return static_cast<Common>((ca | cb) - (ca ^ cb));
+        }
+
+        template <typename T1, typename T2>
+        __forceinline constexpr auto Or(T1 a, T2 b) {
+            using Common = std::common_type_t<T1, T2>;
+            Common ca = static_cast<Common>(a);
+            Common cb = static_cast<Common>(b);
+            return static_cast<Common>((ca ^ cb) + (ca & cb));
+        }
+
+        template <typename T>
+        __forceinline constexpr T Not(T a) {
+            return static_cast<T>(-a - 1);
+        }
+    }
+
+    namespace Opaque {
+        __forceinline bool AlwaysTrue(uint64_t seed) {
+            uint64_t poly = seed * (seed + 1);
+            return ((poly & 1) == 0);
+        }
+
+        __forceinline bool AlwaysFalse(uint64_t seed) {
+            uint64_t poly = seed * (seed + 1);
+            return ((poly & 1) != 0);
+        }
+
+        __forceinline bool Mod3Invariant(uint64_t val) {
+            return (((val * val * val) - val) % 3 == 0);
+        }
+    }
+
     #define IV_STR(str) (IronVeil::EphemeralString<sizeof(str), 0x6C>(str))
     #define IV_WSTR(wstr) (IronVeil::EphemeralWideString<sizeof(wstr)/sizeof(wchar_t), 0x9A>(wstr))
     #define IV_SECURE_STR(str) (IronVeil::RuntimeObfuscatedString<sizeof(str), 0x7B, 0x4D>(str))
 
+    #define IV_MBA_ADD(a, b) (IronVeil::MBA::Add((a), (b)))
+    #define IV_MBA_SUB(a, b) (IronVeil::MBA::Sub((a), (b)))
+    #define IV_MBA_XOR(a, b) (IronVeil::MBA::Xor((a), (b)))
+    #define IV_MBA_AND(a, b) (IronVeil::MBA::And((a), (b)))
+    #define IV_MBA_OR(a, b)  (IronVeil::MBA::Or((a), (b)))
+    #define IV_MBA_NOT(a)    (IronVeil::MBA::Not((a)))
+
+    #define IV_OPAQUE_TRUE(seed)  (IronVeil::Opaque::AlwaysTrue(static_cast<uint64_t>(seed)))
+    #define IV_OPAQUE_FALSE(seed) (IronVeil::Opaque::AlwaysFalse(static_cast<uint64_t>(seed)))
+
     #define IV_JUNK_CODE() do { \
-        volatile uint64_t _iv_j1 = reinterpret_cast<uint64_t>(&_iv_j1); \
-        volatile uint64_t _iv_j2 = __readgsqword(0x30); \
-        _iv_j1 = (_iv_j1 << 5) | (_iv_j1 >> 59); \
-        _iv_j2 ^= _iv_j1; \
-        if ((_iv_j1 ^ _iv_j2) == 0x1337C0DEFEEDFACEULL) { \
+        volatile uint64_t _iv_j1 = __readgsqword(0x30); \
+        volatile uint64_t _iv_j2 = __readgsqword(0x60); \
+        _iv_j1 = IronVeil::MBA::Add(_iv_j1, _iv_j2); \
+        _iv_j2 = IronVeil::MBA::Xor(_iv_j2, _iv_j1); \
+        if (IronVeil::Opaque::AlwaysFalse(_iv_j1 ^ _iv_j2)) { \
             __fastfail(0x42); \
         } \
     } while(0)
 
     #define IV_OPAQUE_BRANCH(junk_action) do { \
-        volatile uint64_t _iv_op1 = __readgsqword(0x30); \
-        volatile uint64_t _iv_op2 = __readgsqword(0x60); \
-        if (((_iv_op1 ^ _iv_op2) & 0x01) && (((_iv_op1 ^ _iv_op2) & 0x02) == 0) && (_iv_op1 == _iv_op2)) { \
+        volatile uint64_t _iv_op = __readgsqword(0x30); \
+        if (IronVeil::Opaque::AlwaysFalse(_iv_op)) { \
             junk_action; \
+        } \
+    } while(0)
+
+    #define IV_OPAQUE_SPLIT(seed, true_action, bogus_action) do { \
+        if (IronVeil::Opaque::AlwaysTrue(static_cast<uint64_t>(seed))) { \
+            true_action; \
+        } else { \
+            bogus_action; \
         } \
     } while(0)
 
@@ -193,7 +278,7 @@ namespace IronVeil {
         volatile uint32_t _iv_cnt = (iterations); \
         volatile uint32_t _iv_accum = 0x5A5A; \
         while (_iv_cnt > 0) { \
-            _iv_accum = (_iv_accum << 3) ^ (_iv_accum >> 5) ^ _iv_cnt; \
+            _iv_accum = IronVeil::MBA::Add(_iv_accum, static_cast<uint32_t>(_iv_cnt)); \
             _iv_cnt--; \
         } \
     } while(0)
