@@ -67,6 +67,8 @@ int main(int argc, char* argv[]) {
             options.sanitizePdata = false;
         } else if (arg == "--no-antidebug") {
             options.antiDebugFlags = IronVeil::ANTIDEBUG_NONE;
+        } else if (arg == "--antidebug-flags" && i + 1 < argc) {
+            options.antiDebugFlags = static_cast<uint32_t>(std::stoul(argv[++i], nullptr, 16));
         } else if (arg == "--no-relocs") {
             options.handleRelocations = false;
         } else if (arg == "--no-tls") {

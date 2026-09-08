@@ -65,11 +65,13 @@ stage4:
 
 transfer_oep:
     mov r10, rax
-    bswap r10
-    bswap r10
-    push r10
-    xor r10, r10
-    ret
+    xor r11, r11
+    test r11, r11
+    jz jump_oep
+    db 0E8h, 000h, 000h, 000h, 000h
+
+jump_oep:
+    jmp r10
 
 dead_trap:
     xor eax, eax

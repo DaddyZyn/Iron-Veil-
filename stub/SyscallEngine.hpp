@@ -11,6 +11,7 @@ namespace IronVeil {
         uintptr_t codeStart;
         uintptr_t codeEnd;
         uintptr_t syscallGadget;
+        int32_t   stride;
         bool initialized;
 
         int32_t GetSsnByHash(uint32_t zwHash) const {
@@ -30,11 +31,11 @@ namespace IronVeil {
                 return *reinterpret_cast<const int32_t*>(pFunc + 4);
             }
 
-            constexpr int32_t STRIDE = 32;
+            int32_t s = (stride > 0) ? stride : 32;
             constexpr int32_t MAX_STEPS = 64;
 
             for (int32_t step = 1; step <= MAX_STEPS; ++step) {
-                const uint8_t* pDown = pFunc + (step * STRIDE);
+                const uint8_t* pDown = pFunc + (step * s);
                 if (codeEnd == 0 || (reinterpret_cast<uintptr_t>(pDown) + 32 <= codeEnd)) {
                     if (pDown[0] == 0x4C && pDown[1] == 0x8B && pDown[2] == 0xD1 && pDown[3] == 0xB8) {
                         int32_t neighborSsn = *reinterpret_cast<const int32_t*>(pDown + 4);
@@ -42,7 +43,26 @@ namespace IronVeil {
                     }
                 }
 
-                const uint8_t* pUp = pFunc - (step * STRIDE);
+                const uint8_t* pUp = pFunc - (step * s);
+                if (codeStart == 0 || (reinterpret_cast<uintptr_t>(pUp) >= codeStart)) {
+                    if (pUp[0] == 0x4C && pUp[1] == 0x8B && pUp[2] == 0xD1 && pUp[3] == 0xB8) {
+                        int32_t neighborSsn = *reinterpret_cast<const int32_t*>(pUp + 4);
+                        return neighborSsn + step;
+                    }
+                }
+            }
+
+            int32_t altStride = (s == 32) ? 16 : 32;
+            for (int32_t step = 1; step <= MAX_STEPS; ++step) {
+                const uint8_t* pDown = pFunc + (step * altStride);
+                if (codeEnd == 0 || (reinterpret_cast<uintptr_t>(pDown) + 32 <= codeEnd)) {
+                    if (pDown[0] == 0x4C && pDown[1] == 0x8B && pDown[2] == 0xD1 && pDown[3] == 0xB8) {
+                        int32_t neighborSsn = *reinterpret_cast<const int32_t*>(pDown + 4);
+                        return neighborSsn - step;
+                    }
+                }
+
+                const uint8_t* pUp = pFunc - (step * altStride);
                 if (codeStart == 0 || (reinterpret_cast<uintptr_t>(pUp) >= codeStart)) {
                     if (pUp[0] == 0x4C && pUp[1] == 0x8B && pUp[2] == 0xD1 && pUp[3] == 0xB8) {
                         int32_t neighborSsn = *reinterpret_cast<const int32_t*>(pUp + 4);
@@ -143,6 +163,7 @@ namespace IronVeil {
             ctx.codeStart = 0;
             ctx.codeEnd = 0;
             ctx.syscallGadget = 0;
+            ctx.stride = 32;
             ctx.initialized = false;
 
             constexpr uint32_t HASH_NTDLL = HashDJB2CaseInsensitive("ntdll.dll");
@@ -159,6 +180,31 @@ namespace IronVeil {
 
             ctx.codeStart = ctx.ntdllBase + nt->OptionalHeader.BaseOfCode;
             ctx.codeEnd = ctx.codeStart + nt->OptionalHeader.SizeOfCode;
+
+            constexpr uint32_t KNOWN_ZW_HASHES[] = {
+                HashDJB2("ZwProtectVirtualMemory"),
+                HashDJB2("ZwQueryInformationProcess"),
+                HashDJB2("ZwAllocateVirtualMemory"),
+                HashDJB2("ZwClose"),
+                HashDJB2("ZwSetInformationThread")
+            };
+
+            for (uint32_t h : KNOWN_ZW_HASHES) {
+                FARPROC p = DynamicResolver::FindExportByHash(hNtdll, h);
+                if (p) {
+                    const uint8_t* pBytes = reinterpret_cast<const uint8_t*>(p);
+                    if (pBytes[0] == 0x4C && pBytes[1] == 0x8B && pBytes[2] == 0xD1 && pBytes[3] == 0xB8) {
+                        for (int32_t delta = 16; delta <= 64; delta += 8) {
+                            if (pBytes[delta] == 0x4C && pBytes[delta + 1] == 0x8B && 
+                                pBytes[delta + 2] == 0xD1 && pBytes[delta + 3] == 0xB8) {
+                                ctx.stride = delta;
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
 
             ctx.syscallGadget = ctx.EnsureGadget();
             if (ctx.syscallGadget == 0) {

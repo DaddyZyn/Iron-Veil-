@@ -19,7 +19,7 @@ add_library(IronVeilStub SHARED
     src/Encryptor.cpp
 )
 target_compile_options(IronVeilStub PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W3 /O2 /GS- /Gy>)
-target_link_options(IronVeilStub PRIVATE /NODEFAULTLIB /ENTRY:StubEntryPoint /MERGE:.rdata=.text)
+target_link_options(IronVeilStub PRIVATE /NODEFAULTLIB /ENTRY:StubEntryPoint /MERGE:.rdata=.text /MERGE:.data=.text)
 
 add_executable(IronVeil
     src/main.cpp

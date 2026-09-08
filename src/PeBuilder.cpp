@@ -250,7 +250,8 @@ namespace IronVeil {
 
         uint8_t encKey[32] = { 0 };
         CryptoUtils::GenerateRandomBytes(encKey, sizeof(encKey));
-        memcpy(config.encryptionKey, encKey, 32);
+        CryptoUtils::GenerateRandomBytes(reinterpret_cast<uint8_t*>(&config.keyCanary), sizeof(config.keyCanary));
+        BlindKey(encKey, config.keyCanary, config.blindedKey);
 
         CryptoUtils::GenerateRandomBytes(config.importsNonce, sizeof(config.importsNonce));
         CryptoUtils::GenerateRandomBytes(config.relocsNonce, sizeof(config.relocsNonce));
@@ -357,6 +358,9 @@ namespace IronVeil {
             nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size = 0;
         }
 
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].VirtualAddress = 0;
+        nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG].Size = 0;
+
         nt->OptionalHeader.DllCharacteristics &= ~0x4000;
 
         std::vector<uint8_t> stubCode;
@@ -453,7 +457,7 @@ namespace IronVeil {
         newSec.Misc.VirtualSize = guardVirtualSize;
         newSec.PointerToRawData = guardRawOffset;
         newSec.SizeOfRawData = guardRawSize;
-        newSec.Characteristics = IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_CNT_CODE;
+        newSec.Characteristics = IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_CNT_CODE;
 
         size_t secHeaderOffset = reinterpret_cast<uint8_t*>(&sections[nt->FileHeader.NumberOfSections]) - rawBuffer.data();
         if (secHeaderOffset + sizeof(IMAGE_SECTION_HEADER) > nt->OptionalHeader.SizeOfHeaders) {

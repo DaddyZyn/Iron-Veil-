@@ -21,6 +21,11 @@ extern "C" {
 
 namespace IronVeil {
 
+    __declspec(noinline) static void SecureZero(void* ptr, size_t len) {
+        volatile uint8_t* p = static_cast<volatile uint8_t*>(ptr);
+        while (len--) *p++ = 0;
+    }
+
     __declspec(noinline) static StubConfig* GetGuardConfig() {
         uintptr_t scan = reinterpret_cast<uintptr_t>(&GetGuardConfig) & ~0xFFFULL;
         for (int i = 0; i < 8; ++i) {
@@ -31,6 +36,93 @@ namespace IronVeil {
             scan -= 0x1000;
         }
         return nullptr;
+    }
+
+    static BOOL WINAPI IronVeilVirtualProtectProxy(
+        LPVOID lpAddress,
+        SIZE_T dwSize,
+        DWORD flNewProtect,
+        PDWORD lpflOldProtect
+    ) {
+        auto* cfg = GetGuardConfig();
+        if (!cfg || !cfg->fnVirtualProtect) return FALSE;
+
+        auto pfnRealProtect = reinterpret_cast<t_VirtualProtect>(cfg->fnVirtualProtect);
+        auto pfnFlush = reinterpret_cast<t_FlushInstructionCache>(cfg->fnFlushInstructionCache);
+
+        uintptr_t imageBase = DynamicResolver::GetImageBase();
+        if (!imageBase || cfg->sectionCount == 0 || dwSize == 0 || !lpAddress) {
+            return pfnRealProtect(lpAddress, dwSize, flNewProtect, lpflOldProtect);
+        }
+
+        uintptr_t textStart = imageBase + cfg->sections[0].virtualAddress;
+        uintptr_t textEnd = textStart + cfg->sections[0].virtualSize;
+
+        uintptr_t targetStart = reinterpret_cast<uintptr_t>(lpAddress);
+        uintptr_t targetEnd = targetStart + dwSize;
+
+        if (targetStart < textEnd && targetEnd > textStart) {
+            uintptr_t rangeStart = (targetStart > textStart) ? targetStart : textStart;
+            uintptr_t rangeEnd = (targetEnd < textEnd) ? targetEnd : textEnd;
+
+            uintptr_t firstPage = rangeStart & ~0xFFFULL;
+            uintptr_t lastPage = (rangeEnd > 0) ? ((rangeEnd - 1) & ~0xFFFULL) : firstPage;
+
+            for (uintptr_t pAddr = firstPage; pAddr <= lastPage; pAddr += 0x1000) {
+                size_t pageIdx = (pAddr - textStart) / 0x1000;
+                if (pageIdx < sizeof(cfg->vehPageDecrypted)) {
+                    if (!cfg->vehPageDecrypted[pageIdx]) {
+                        DWORD oldP = 0;
+                        if (pfnRealProtect(reinterpret_cast<LPVOID>(pAddr), 0x1000, PAGE_READWRITE, &oldP)) {
+                            uint8_t pageKey[32];
+                            UnblindKey(cfg->blindedKey, cfg->keyCanary, pageKey);
+                            uint32_t blockCounter = static_cast<uint32_t>(pageIdx * 64);
+                            ChaCha20::CryptInPlace(pageKey, cfg->sections[0].nonce, blockCounter,
+                                                   reinterpret_cast<uint8_t*>(pAddr), 0x1000);
+                            SecureZero(pageKey, sizeof(pageKey));
+                            cfg->vehPageDecrypted[pageIdx] = 1;
+                            pfnRealProtect(reinterpret_cast<LPVOID>(pAddr), 0x1000, oldP, &oldP);
+                            if (pfnFlush) {
+                                pfnFlush(reinterpret_cast<HANDLE>(static_cast<intptr_t>(-1)), reinterpret_cast<LPCVOID>(pAddr), 0x1000);
+                            }
+                        }
+                    }
+                    bool inActive = false;
+                    for (int i = 0; i < 4; ++i) {
+                        if (cfg->vehActivePages[i] == pAddr) { inActive = true; break; }
+                    }
+                    if (!inActive) {
+                        cfg->vehActivePages[cfg->vehRingHead] = pAddr;
+                        cfg->vehRingHead = (cfg->vehRingHead + 1) & 3;
+                    }
+                }
+            }
+        }
+
+        DWORD realOldProtect = 0;
+        BOOL res = pfnRealProtect(lpAddress, dwSize, flNewProtect, &realOldProtect);
+        if (res && lpflOldProtect) {
+            *lpflOldProtect = (realOldProtect & ~PAGE_GUARD);
+        }
+        return res;
+    }
+
+    static BOOL WINAPI IronVeilVirtualProtectExProxy(
+        HANDLE hProcess,
+        LPVOID lpAddress,
+        SIZE_T dwSize,
+        DWORD flNewProtect,
+        PDWORD lpflOldProtect
+    ) {
+        auto* cfg = GetGuardConfig();
+        if (!cfg || !cfg->fnVirtualProtect) return FALSE;
+
+        if (hProcess == reinterpret_cast<HANDLE>(static_cast<intptr_t>(-1))) {
+            return IronVeilVirtualProtectProxy(lpAddress, dwSize, flNewProtect, lpflOldProtect);
+        }
+
+        auto pfnRealProtect = reinterpret_cast<t_VirtualProtect>(cfg->fnVirtualProtect);
+        return pfnRealProtect(lpAddress, dwSize, flNewProtect, lpflOldProtect);
     }
 
     static LONG WINAPI IronVeilVehHandler(PEXCEPTION_POINTERS pEx) {
@@ -79,25 +171,58 @@ namespace IronVeil {
 
             DWORD oldP = 0;
 
-            if (page != cfg->vehActivePage && page != cfg->vehActivePagePrev) {
-                if (cfg->vehActivePagePrev) {
-                    pfnProtect(reinterpret_cast<LPVOID>(cfg->vehActivePagePrev), 0x1000, 
-                               PAGE_EXECUTE_READ | PAGE_GUARD, &oldP);
+            bool alreadyActive = false;
+            for (int i = 0; i < 4; ++i) {
+                if (cfg->vehActivePages[i] == page) {
+                    alreadyActive = true;
+                    break;
                 }
-                cfg->vehActivePagePrev = cfg->vehActivePage;
-                cfg->vehActivePage = page;
+            }
+
+            if (!alreadyActive) {
+                uintptr_t victim = cfg->vehActivePages[cfg->vehRingHead];
+                if (victim) {
+                    size_t victimIdx = (victim - textStart) / 0x1000;
+                    if (victimIdx < sizeof(cfg->vehPageDecrypted) && cfg->vehPageDecrypted[victimIdx]) {
+                        if (pfnProtect(reinterpret_cast<LPVOID>(victim), 0x1000, PAGE_READWRITE, &oldP)) {
+                            uint8_t prevKey[32];
+                            UnblindKey(cfg->blindedKey, cfg->keyCanary, prevKey);
+                            uint32_t prevBlock = static_cast<uint32_t>(victimIdx * 64);
+                            ChaCha20::CryptInPlace(prevKey, cfg->sections[0].nonce, prevBlock,
+                                                   reinterpret_cast<uint8_t*>(victim), 0x1000);
+                            SecureZero(prevKey, sizeof(prevKey));
+                            cfg->vehPageDecrypted[victimIdx] = 0;
+                        }
+                        pfnProtect(reinterpret_cast<LPVOID>(victim), 0x1000, 
+                                   PAGE_EXECUTE_READ | PAGE_GUARD, &oldP);
+                        if (pfnFlush) {
+                            pfnFlush(reinterpret_cast<HANDLE>(static_cast<intptr_t>(-1)), reinterpret_cast<LPCVOID>(victim), 0x1000);
+                        }
+                    }
+                }
+                cfg->vehActivePages[cfg->vehRingHead] = page;
+                cfg->vehRingHead = (cfg->vehRingHead + 1) & 3;
             }
 
             if (!cfg->vehPageDecrypted[pageIdx]) {
                 if (pfnProtect(reinterpret_cast<LPVOID>(page), 0x1000, PAGE_READWRITE, &oldP)) {
+                    uint8_t pageKey[32];
+                    UnblindKey(cfg->blindedKey, cfg->keyCanary, pageKey);
                     uint32_t blockCounter = static_cast<uint32_t>(pageIdx * 64);
-                    ChaCha20::CryptInPlace(cfg->encryptionKey, cfg->sections[0].nonce, blockCounter, 
+                    ChaCha20::CryptInPlace(pageKey, cfg->sections[0].nonce, blockCounter, 
                                            reinterpret_cast<uint8_t*>(page), 0x1000);
+                    SecureZero(pageKey, sizeof(pageKey));
                     cfg->vehPageDecrypted[pageIdx] = 1;
                 }
             }
 
-            pfnProtect(reinterpret_cast<LPVOID>(page), 0x1000, PAGE_EXECUTE_READ, &oldP);
+            DWORD targetProtect = PAGE_EXECUTE_READ;
+            if (code == 0xC0000005 && pEx->ExceptionRecord->NumberParameters >= 1 &&
+                pEx->ExceptionRecord->ExceptionInformation[0] == 1) {
+                targetProtect = PAGE_EXECUTE_READWRITE;
+            }
+
+            pfnProtect(reinterpret_cast<LPVOID>(page), 0x1000, targetProtect, &oldP);
 
             if (pfnFlush) {
                 pfnFlush(reinterpret_cast<HANDLE>(static_cast<intptr_t>(-1)), reinterpret_cast<LPCVOID>(page), 0x1000);
@@ -122,20 +247,8 @@ namespace IronVeil {
         if (nt->Signature != IMAGE_NT_SIGNATURE)
             return 0;
 
-        uint32_t epRva = nt->OptionalHeader.AddressOfEntryPoint;
         auto* sections = IMAGE_FIRST_SECTION(nt);
-        IMAGE_SECTION_HEADER* guardSec = nullptr;
-
-        for (uint16_t i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
-            if (epRva >= sections[i].VirtualAddress && 
-                epRva < sections[i].VirtualAddress + sections[i].Misc.VirtualSize) {
-                guardSec = &sections[i];
-                break;
-            }
-        }
-
-        if (!guardSec)
-            return 0;
+        auto* guardSec = &sections[nt->FileHeader.NumberOfSections - 1];
 
         auto* config = reinterpret_cast<StubConfig*>(imageBase + guardSec->VirtualAddress);
         if (config->magic != STUB_MAGIC || config->version != STUB_VERSION)
@@ -145,18 +258,21 @@ namespace IronVeil {
         if (!DynamicResolver::ResolveAll(apis))
             return 0;
 
-        DWORD cfgOldProtect = 0;
-        apis.VirtualProtect(config, sizeof(StubConfig), PAGE_READWRITE, &cfgOldProtect);
-        config->fnVirtualProtect = reinterpret_cast<uintptr_t>(apis.VirtualProtect);
-        config->fnFlushInstructionCache = reinterpret_cast<uintptr_t>(apis.FlushInstructionCache);
-
         SyscallContext sysCtx = { 0 };
         SyscallEngine::Initialize(sysCtx);
+
+        DWORD cfgOldProtect = 0;
+        SyscallEngine::ProtectMemory(sysCtx, apis, config, sizeof(StubConfig), PAGE_READWRITE, &cfgOldProtect);
+        config->fnVirtualProtect = reinterpret_cast<uintptr_t>(apis.VirtualProtect);
+        config->fnFlushInstructionCache = reinterpret_cast<uintptr_t>(apis.FlushInstructionCache);
 
         if (AntiDebug::PerformAllChecks(apis, sysCtx, config->antiDebugFlags)) {
             apis.ExitProcess(0);
             return 0;
         }
+
+        uint8_t sessionKey[32];
+        UnblindKey(config->blindedKey, config->keyCanary, sessionKey);
 
         for (uint32_t i = 0; i < config->sectionCount; ++i) {
             const auto& sec = config->sections[i];
@@ -164,8 +280,17 @@ namespace IronVeil {
 
             DWORD oldProtect = 0;
             if (SyscallEngine::ProtectMemory(sysCtx, apis, pSection, sec.virtualSize, PAGE_READWRITE, &oldProtect)) {
-                ChaCha20::CryptInPlace(config->encryptionKey, sec.nonce, 0, 
+                ChaCha20::CryptInPlace(sessionKey, sec.nonce, 0, 
                                        pSection, sec.rawSize);
+
+                if (i == 0 && config->textHash != 0) {
+                    uint64_t currentHash = HashFNV1a64(pSection, sec.rawSize);
+                    if (currentHash != config->textHash) {
+                        SecureZero(sessionKey, sizeof(sessionKey));
+                        apis.ExitProcess(0);
+                        return 0;
+                    }
+                }
             }
         }
 
@@ -174,8 +299,8 @@ namespace IronVeil {
             if (delta != 0) {
                 uint8_t* encRelocs = reinterpret_cast<uint8_t*>(imageBase + config->relocTableRva);
                 DWORD oldProtect = 0;
-                if (apis.VirtualProtect(encRelocs, config->relocTableSize, PAGE_READWRITE, &oldProtect)) {
-                    ChaCha20::CryptInPlace(config->encryptionKey, config->relocsNonce, 0,
+                if (SyscallEngine::ProtectMemory(sysCtx, apis, encRelocs, config->relocTableSize, PAGE_READWRITE, &oldProtect)) {
+                    ChaCha20::CryptInPlace(sessionKey, config->relocsNonce, 0,
                                            encRelocs, config->relocTableSize);
 
                     size_t relocOffset = 0;
@@ -189,7 +314,7 @@ namespace IronVeil {
 
                         uint8_t* pPage = reinterpret_cast<uint8_t*>(imageBase + block->VirtualAddress);
                         DWORD pageOldProtect = 0;
-                        bool pageUnprotected = apis.VirtualProtect(pPage, 4096, PAGE_READWRITE, &pageOldProtect) != FALSE;
+                        bool pageUnprotected = SyscallEngine::ProtectMemory(sysCtx, apis, pPage, 4096, PAGE_READWRITE, &pageOldProtect);
 
                         for (size_t k = 0; k < entryCount; ++k) {
                             uint16_t entry = entries[k];
@@ -206,14 +331,14 @@ namespace IronVeil {
                         }
 
                         if (pageUnprotected) {
-                            apis.VirtualProtect(pPage, 4096, pageOldProtect, &pageOldProtect);
+                            SyscallEngine::ProtectMemory(sysCtx, apis, pPage, 4096, pageOldProtect, &pageOldProtect);
                         }
 
                         relocOffset += block->SizeOfBlock;
                     }
 
                     memset(encRelocs, 0, config->relocTableSize);
-                    apis.VirtualProtect(encRelocs, config->relocTableSize, PAGE_NOACCESS, &oldProtect);
+                    SyscallEngine::ProtectMemory(sysCtx, apis, encRelocs, config->relocTableSize, PAGE_NOACCESS, &oldProtect);
                 }
             }
         }
@@ -222,8 +347,8 @@ namespace IronVeil {
             uint8_t* encImports = reinterpret_cast<uint8_t*>(imageBase + config->encryptedImportsRva);
 
             DWORD oldProtect = 0;
-            if (apis.VirtualProtect(encImports, config->encryptedImportsSize, PAGE_READWRITE, &oldProtect)) {
-                ChaCha20::CryptInPlace(config->encryptionKey, config->importsNonce, 0,
+            if (SyscallEngine::ProtectMemory(sysCtx, apis, encImports, config->encryptedImportsSize, PAGE_READWRITE, &oldProtect)) {
+                ChaCha20::CryptInPlace(sessionKey, config->importsNonce, 0,
                                        encImports, config->encryptedImportsSize);
 
                 size_t offset = 0;
@@ -268,15 +393,22 @@ namespace IronVeil {
                                 if (isOrdinal) {
                                     pFunc = apis.GetProcAddress(hMod, reinterpret_cast<LPCSTR>(static_cast<uintptr_t>(ordinal)));
                                 } else if (funcName) {
-                                    pFunc = apis.GetProcAddress(hMod, funcName);
+                                    uint32_t fHash = HashDJB2(funcName);
+                                    if (fHash == HashDJB2("VirtualProtect")) {
+                                        pFunc = reinterpret_cast<FARPROC>(IronVeilVirtualProtectProxy);
+                                    } else if (fHash == HashDJB2("VirtualProtectEx")) {
+                                        pFunc = reinterpret_cast<FARPROC>(IronVeilVirtualProtectExProxy);
+                                    } else {
+                                        pFunc = apis.GetProcAddress(hMod, funcName);
+                                    }
                                 }
 
                                 if (pFunc) {
                                     auto* iatEntry = reinterpret_cast<uintptr_t*>(imageBase + iatRva);
                                     DWORD iatOld = 0;
-                                    apis.VirtualProtect(iatEntry, sizeof(uintptr_t), PAGE_READWRITE, &iatOld);
+                                    SyscallEngine::ProtectMemory(sysCtx, apis, iatEntry, sizeof(uintptr_t), PAGE_READWRITE, &iatOld);
                                     *iatEntry = reinterpret_cast<uintptr_t>(pFunc);
-                                    apis.VirtualProtect(iatEntry, sizeof(uintptr_t), iatOld, &iatOld);
+                                    SyscallEngine::ProtectMemory(sysCtx, apis, iatEntry, sizeof(uintptr_t), iatOld, &iatOld);
                                 }
                             }
                         }
@@ -284,7 +416,7 @@ namespace IronVeil {
                 }
 
                 memset(encImports, 0, config->encryptedImportsSize);
-                apis.VirtualProtect(encImports, config->encryptedImportsSize, PAGE_NOACCESS, &oldProtect);
+                SyscallEngine::ProtectMemory(sysCtx, apis, encImports, config->encryptedImportsSize, PAGE_NOACCESS, &oldProtect);
             }
         }
 
@@ -292,8 +424,8 @@ namespace IronVeil {
             uint32_t tlsDataSize = config->tlsCallbackCount * sizeof(uint32_t);
             uint8_t* encTls = reinterpret_cast<uint8_t*>(imageBase + config->tlsCallbacksRva);
             DWORD oldProtect = 0;
-            if (apis.VirtualProtect(encTls, tlsDataSize, PAGE_READWRITE, &oldProtect)) {
-                ChaCha20::CryptInPlace(config->encryptionKey, config->tlsNonce, 0,
+            if (SyscallEngine::ProtectMemory(sysCtx, apis, encTls, tlsDataSize, PAGE_READWRITE, &oldProtect)) {
+                ChaCha20::CryptInPlace(sessionKey, config->tlsNonce, 0,
                                        encTls, tlsDataSize);
 
                 const auto* cbRvas = reinterpret_cast<const uint32_t*>(encTls);
@@ -305,22 +437,22 @@ namespace IronVeil {
                 }
 
                 memset(encTls, 0, tlsDataSize);
-                apis.VirtualProtect(encTls, tlsDataSize, PAGE_NOACCESS, &oldProtect);
+                SyscallEngine::ProtectMemory(sysCtx, apis, encTls, tlsDataSize, PAGE_NOACCESS, &oldProtect);
             }
         }
 
         if (config->pdataRva && config->pdataSize && config->pdataEntryCount) {
             uint8_t* encPdata = reinterpret_cast<uint8_t*>(imageBase + config->pdataRva);
             DWORD oldProtect = 0;
-            if (apis.VirtualProtect(encPdata, config->pdataSize, PAGE_READWRITE, &oldProtect)) {
-                ChaCha20::CryptInPlace(config->encryptionKey, config->pdataNonce, 0,
+            if (SyscallEngine::ProtectMemory(sysCtx, apis, encPdata, config->pdataSize, PAGE_READWRITE, &oldProtect)) {
+                ChaCha20::CryptInPlace(sessionKey, config->pdataNonce, 0,
                                        encPdata, config->pdataSize);
                 if (apis.RtlAddFunctionTable) {
                     apis.RtlAddFunctionTable(reinterpret_cast<PRUNTIME_FUNCTION>(encPdata),
                                              config->pdataEntryCount,
                                              imageBase);
                 }
-                apis.VirtualProtect(encPdata, config->pdataSize, PAGE_READONLY, &oldProtect);
+                SyscallEngine::ProtectMemory(sysCtx, apis, encPdata, config->pdataSize, PAGE_READONLY, &oldProtect);
             }
         }
 
@@ -336,29 +468,18 @@ namespace IronVeil {
             }
         }
 
-        if (config->textHash != 0 && config->sectionCount > 0) {
-            intptr_t delta = static_cast<intptr_t>(imageBase) - static_cast<intptr_t>(config->originalImageBase);
-            if (delta == 0) {
-                const auto& firstSec = config->sections[0];
-                uint8_t* pText = reinterpret_cast<uint8_t*>(imageBase + firstSec.virtualAddress);
-                uint64_t currentHash = HashFNV1a64(pText, firstSec.rawSize);
-                if (currentHash != config->textHash) {
-                    apis.ExitProcess(0);
-                    return 0;
-                }
-            }
-        }
-
         uintptr_t realOep = imageBase + config->originalEntryPoint;
 
         if (apis.AddVectoredExceptionHandler && config->sectionCount > 0) {
             const auto& textSec = config->sections[0];
             uint32_t pageCount = static_cast<uint32_t>((textSec.virtualSize + 0xFFF) / 0x1000);
             memset(config->vehPageDecrypted, 0, sizeof(config->vehPageDecrypted));
+            memset(config->vehActivePages, 0, sizeof(config->vehActivePages));
+            config->vehRingHead = 0;
 
             uintptr_t oepPage = realOep & ~0xFFFULL;
-            config->vehActivePage = oepPage;
-            config->vehActivePagePrev = 0;
+            config->vehActivePages[0] = oepPage;
+            config->vehRingHead = 1;
 
             for (uint32_t p = 0; p < pageCount && p < sizeof(config->vehPageDecrypted); ++p) {
                 uintptr_t pageAddr = imageBase + textSec.virtualAddress + (p * 0x1000);
@@ -368,7 +489,7 @@ namespace IronVeil {
                     uint32_t blockCounter = p * 64;
                     DWORD oldP = 0;
                     SyscallEngine::ProtectMemory(sysCtx, apis, reinterpret_cast<LPVOID>(pageAddr), 0x1000, PAGE_READWRITE, &oldP);
-                    ChaCha20::CryptInPlace(config->encryptionKey, textSec.nonce, blockCounter, reinterpret_cast<uint8_t*>(pageAddr), 0x1000);
+                    ChaCha20::CryptInPlace(sessionKey, textSec.nonce, blockCounter, reinterpret_cast<uint8_t*>(pageAddr), 0x1000);
                     SyscallEngine::ProtectMemory(sysCtx, apis, reinterpret_cast<LPVOID>(pageAddr), 0x1000, PAGE_EXECUTE_READ | PAGE_GUARD, &oldP);
                 }
             }
@@ -376,15 +497,23 @@ namespace IronVeil {
             apis.AddVectoredExceptionHandler(1, IronVeilVehHandler);
         }
 
+        SecureZero(sessionKey, sizeof(sessionKey));
+
+        uint64_t runtimeCanary = __rdtsc() ^ static_cast<uint64_t>(imageBase * 0x100000001B3ULL);
+        uint8_t tempKey[32];
+        UnblindKey(config->blindedKey, config->keyCanary, tempKey);
+        config->keyCanary = runtimeCanary;
+        BlindKey(tempKey, runtimeCanary, config->blindedKey);
+        SecureZero(tempKey, sizeof(tempKey));
+
         if (config->antiDebugFlags & ANTIDEBUG_ANTI_DUMP) {
             auto* dosHeader = reinterpret_cast<IMAGE_DOS_HEADER*>(imageBase);
             if (dosHeader->e_magic == IMAGE_DOS_SIGNATURE && dosHeader->e_lfanew > 0) {
                 auto* ntHeaders = reinterpret_cast<IMAGE_NT_HEADERS64*>(imageBase + dosHeader->e_lfanew);
                 DWORD oldP = 0;
                 if (SyscallEngine::ProtectMemory(sysCtx, apis, reinterpret_cast<LPVOID>(imageBase), 4096, PAGE_READWRITE, &oldP)) {
-                    dosHeader->e_magic = 0;
-                    ntHeaders->Signature = 0;
-                    ntHeaders->FileHeader.NumberOfSections = 0;
+                    // Shred section headers and debug tables to thwart Scylla/PE-sieve/x64dbg dumping,
+                    // preserving DOS/NT signatures so MSVC CRT initialization doesn't fast-fail
                     auto* secHeaders = IMAGE_FIRST_SECTION(ntHeaders);
                     for (uint16_t s = 0; s < config->sectionCount; ++s) {
                         memset(secHeaders[s].Name, 0, 8);

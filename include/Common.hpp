@@ -62,7 +62,8 @@ namespace IronVeil {
         uint32_t pdataSize;
         uint32_t pdataEntryCount;
         uint64_t textHash;
-        uint8_t  encryptionKey[32];
+        uint8_t  blindedKey[32];
+        uint64_t keyCanary;
         uint8_t  importsNonce[12];
         uint8_t  relocsNonce[12];
         uint8_t  tlsNonce[12];
@@ -71,11 +72,31 @@ namespace IronVeil {
         ProtectedSectionInfo sections[16];
         uintptr_t fnVirtualProtect;
         uintptr_t fnFlushInstructionCache;
-        uintptr_t vehActivePage;
-        uintptr_t vehActivePagePrev;
+        uintptr_t vehActivePages[4];
+        uint32_t  vehRingHead;
         uint8_t   vehPageDecrypted[256];
     };
     #pragma pack(pop)
+
+    inline void BlindKey(const uint8_t* inKey, uint64_t canary, uint8_t* outBlindedKey) {
+#if defined(_MSC_VER)
+        #pragma loop(no_vector)
+#endif
+        for (size_t i = 0; i < 32; ++i) {
+            uint8_t cByte = static_cast<uint8_t>((canary >> ((i & 7) * 8)) & 0xFF);
+            outBlindedKey[i] = static_cast<uint8_t>(inKey[i] ^ cByte ^ static_cast<uint8_t>((i * 0x5A) + 0x33));
+        }
+    }
+
+    inline void UnblindKey(const uint8_t* inBlindedKey, uint64_t canary, uint8_t* outKey) {
+#if defined(_MSC_VER)
+        #pragma loop(no_vector)
+#endif
+        for (size_t i = 0; i < 32; ++i) {
+            uint8_t cByte = static_cast<uint8_t>((canary >> ((i & 7) * 8)) & 0xFF);
+            outKey[i] = static_cast<uint8_t>(inBlindedKey[i] ^ cByte ^ static_cast<uint8_t>((i * 0x5A) + 0x33));
+        }
+    }
 
     constexpr uint32_t HashDJB2(const char* str, uint32_t h = 5381) {
         return (!*str) ? h : HashDJB2(str + 1, ((h << 5) + h) ^ static_cast<uint8_t>(*str));

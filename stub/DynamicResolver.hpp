@@ -78,6 +78,7 @@ namespace IronVeil {
     using t_RtlAddFunctionTable = BOOLEAN(NTAPI*)(PRUNTIME_FUNCTION FunctionTable, DWORD EntryCount, DWORD64 BaseAddress);
     using t_AddVectoredExceptionHandler = PVOID(WINAPI*)(ULONG First, PVECTORED_EXCEPTION_HANDLER Handler);
     using t_RemoveVectoredExceptionHandler = ULONG(WINAPI*)(PVOID Handle);
+    using t_RtlCaptureContext = void(WINAPI*)(PCONTEXT ContextRecord);
 
     struct ResolvedApis {
         t_VirtualProtect VirtualProtect = nullptr;
@@ -99,6 +100,7 @@ namespace IronVeil {
         t_NtQuerySystemInformation NtQuerySystemInformation = nullptr;
         t_NtProtectVirtualMemory NtProtectVirtualMemory = nullptr;
         t_NtAllocateVirtualMemory NtAllocateVirtualMemory = nullptr;
+        t_RtlCaptureContext RtlCaptureContext = nullptr;
 
         FARPROC pNtOpenProcess = nullptr;
         FARPROC pNtCreateThreadEx = nullptr;
@@ -385,6 +387,13 @@ namespace IronVeil {
             if (!outApis.RtlAddFunctionTable) {
                 outApis.RtlAddFunctionTable = reinterpret_cast<t_RtlAddFunctionTable>(
                     resolveK(HashDJB2("RtlAddFunctionTable")));
+            }
+
+            outApis.RtlCaptureContext = reinterpret_cast<t_RtlCaptureContext>(
+                FindExportByHash(hNtdll, HashDJB2("RtlCaptureContext")));
+            if (!outApis.RtlCaptureContext) {
+                outApis.RtlCaptureContext = reinterpret_cast<t_RtlCaptureContext>(
+                    resolveK(HashDJB2("RtlCaptureContext")));
             }
 
             outApis.NtQueryInformationProcess = reinterpret_cast<t_NtQueryInformationProcess>(

@@ -295,38 +295,61 @@ namespace IronVeil {
         }
 
         static bool CheckHardwareBreakpoints(const ResolvedApis& apis) {
-            if (!apis.GetThreadContext || !apis.GetCurrentThread)
-                return false;
-
-            CONTEXT ctx = { 0 };
+            alignas(16) CONTEXT ctx = { 0 };
             ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
 
-            if (apis.GetThreadContext(apis.GetCurrentThread(), &ctx)) {
+            if (apis.RtlCaptureContext) {
+                apis.RtlCaptureContext(&ctx);
                 if (ctx.Dr0 != 0 || ctx.Dr1 != 0 || ctx.Dr2 != 0 || ctx.Dr3 != 0 || (ctx.Dr7 & 0x55) != 0) {
-                    if (apis.SetThreadContext) {
+                    if (apis.SetThreadContext && apis.GetCurrentThread) {
                         ctx.Dr0 = ctx.Dr1 = ctx.Dr2 = ctx.Dr3 = ctx.Dr6 = ctx.Dr7 = 0;
                         apis.SetThreadContext(apis.GetCurrentThread(), &ctx);
                     }
                     return true;
                 }
             }
+
+            if (apis.GetThreadContext && apis.GetCurrentThread) {
+                alignas(16) CONTEXT fallbackCtx = { 0 };
+                fallbackCtx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+                if (apis.GetThreadContext(apis.GetCurrentThread(), &fallbackCtx)) {
+                    if (fallbackCtx.Dr0 != 0 || fallbackCtx.Dr1 != 0 || fallbackCtx.Dr2 != 0 || fallbackCtx.Dr3 != 0 || (fallbackCtx.Dr7 & 0x55) != 0) {
+                        if (apis.SetThreadContext) {
+                            fallbackCtx.Dr0 = fallbackCtx.Dr1 = fallbackCtx.Dr2 = fallbackCtx.Dr3 = fallbackCtx.Dr6 = fallbackCtx.Dr7 = 0;
+                            apis.SetThreadContext(apis.GetCurrentThread(), &fallbackCtx);
+                        }
+                        return true;
+                    }
+                }
+            }
             return false;
         }
 
         static bool CheckTiming() {
-            unsigned int aux = 0;
-            uint64_t t1 = __rdtscp(&aux);
+            uint64_t minDelta = 0xFFFFFFFFFFFFFFFFULL;
             volatile uint64_t hash = 0xCBF29CE484222325ULL;
-            for (int i = 0; i < 64; ++i) {
-                hash = (hash ^ (i * 0x5A)) * 0x100000001B3ULL;
+
+            for (int sample = 0; sample < 10; ++sample) {
+                unsigned int aux = 0;
+                _mm_lfence();
+                uint64_t t1 = __rdtscp(&aux);
+                for (int i = 0; i < 32; ++i) {
+                    hash = (hash ^ (i * 0x5A)) * 0x100000001B3ULL;
+                }
+                _mm_lfence();
+                uint64_t t2 = __rdtscp(&aux);
+                uint64_t delta = (t2 > t1) ? (t2 - t1) : 0;
+                if (delta < minDelta) {
+                    minDelta = delta;
+                }
             }
-            uint64_t t2 = __rdtscp(&aux);
-            if ((t2 - t1) > 0x80000 || hash == 0) return true;
+
+            if (minDelta > 250000 || hash == 0) return true;
 
             uint32_t tick1 = *reinterpret_cast<volatile uint32_t*>(0x7FFE0320);
             for (volatile int k = 0; k < 5000; ++k);
             uint32_t tick2 = *reinterpret_cast<volatile uint32_t*>(0x7FFE0320);
-            if ((tick2 - tick1) > 100) return true;
+            if ((tick2 - tick1) > 200) return true;
 
             return false;
         }
