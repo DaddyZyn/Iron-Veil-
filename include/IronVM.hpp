@@ -31,17 +31,52 @@ namespace VM {
         VM_OP_JMP        = 0xD1,
         VM_OP_JZ         = 0xD2,
         VM_OP_JNZ        = 0xD3,
+        VM_OP_READ_MEM   = 0xE1,
+        VM_OP_WRITE_MEM  = 0xE2,
         VM_OP_RET        = 0xFF
     };
 
     struct VmContext {
-        uint64_t regs[8] = { 0 };
+        uint64_t rawRegs[8] = { 0 };
+        uint64_t canaries[8] = { 
+            0xA5A5A5A55A5A5A5AULL, 0x123456789ABCDEF0ULL, 
+            0xFEDCBA9876543210ULL, 0x1337C0DECAFEBABFULL,
+            0x4242424224242424ULL, 0x7E7E7E7E81818181ULL,
+            0x99663300FFCCDDBBULL, 0x0123456789ABCDEFULL 
+        };
         uint64_t stack[256] = { 0 };
         size_t sp = 0;
         size_t ip = 0;
         bool flagZero = false;
         bool flagSign = false;
         bool running = true;
+
+        struct RegProxy {
+            uint64_t& storage;
+            uint64_t canary;
+            operator uint64_t() const { return storage ^ canary; }
+            RegProxy& operator=(uint64_t val) { storage = val ^ canary; return *this; }
+            RegProxy& operator=(const RegProxy& other) { storage = (static_cast<uint64_t>(other)) ^ canary; return *this; }
+            RegProxy& operator+=(uint64_t val) { storage = ((storage ^ canary) + val) ^ canary; return *this; }
+            RegProxy& operator-=(uint64_t val) { storage = ((storage ^ canary) - val) ^ canary; return *this; }
+            RegProxy& operator^=(uint64_t val) { storage = ((storage ^ canary) ^ val) ^ canary; return *this; }
+            RegProxy& operator&=(uint64_t val) { storage = ((storage ^ canary) & val) ^ canary; return *this; }
+            RegProxy& operator|=(uint64_t val) { storage = ((storage ^ canary) | val) ^ canary; return *this; }
+            RegProxy& operator<<=(uint8_t shift) { storage = ((storage ^ canary) << shift) ^ canary; return *this; }
+            RegProxy& operator>>=(uint8_t shift) { storage = ((storage ^ canary) >> shift) ^ canary; return *this; }
+        };
+
+        struct RegArrayProxy {
+            VmContext* parent;
+            RegProxy operator[](size_t idx) {
+                return RegProxy{ parent->rawRegs[idx & 0x07], parent->canaries[idx & 0x07] };
+            }
+            uint64_t operator[](size_t idx) const {
+                return parent->rawRegs[idx & 0x07] ^ parent->canaries[idx & 0x07];
+            }
+        };
+
+        RegArrayProxy regs{ this };
     };
 
     class VirtualMachine {
@@ -57,115 +92,115 @@ namespace VM {
             ctx.regs[2] = arg2;
             ctx.regs[3] = arg3;
 
-            std::vector<uint8_t> code(bytecode, bytecode + size);
-            uint8_t key = initialKey;
-            for (size_t i = 0; i < size; ++i) {
-                code[i] ^= key;
-                key = static_cast<uint8_t>((key * 33) + 7);
-            }
+            auto fetchByte = [&]() -> uint8_t {
+                if (ctx.ip >= size) { ctx.running = false; return 0; }
+                size_t curr = ctx.ip++;
+                uint8_t k = static_cast<uint8_t>((initialKey * 33) + (curr * 7) + 13);
+                return bytecode[curr] ^ k;
+            };
 
-            while (ctx.running && ctx.ip < code.size()) {
-                uint8_t op = code[ctx.ip++];
+            while (ctx.running && ctx.ip < size) {
+                uint8_t op = fetchByte();
 
                 switch (op) {
                 case VM_OP_NOP:
                     break;
 
                 case VM_OP_IMM64: {
-                    if (ctx.ip + 9 > code.size()) { ctx.running = false; break; }
-                    uint8_t reg = code[ctx.ip++] & 0x07;
+                    if (ctx.ip + 9 > size) { ctx.running = false; break; }
+                    uint8_t reg = fetchByte() & 0x07;
                     uint64_t imm = 0;
                     for (int k = 0; k < 8; ++k) {
-                        imm |= (static_cast<uint64_t>(code[ctx.ip++]) << (k * 8));
+                        imm |= (static_cast<uint64_t>(fetchByte()) << (k * 8));
                     }
                     ctx.regs[reg] = imm;
                     break;
                 }
 
                 case VM_OP_MOV: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    uint8_t dst = code[ctx.ip++] & 0x07;
-                    uint8_t src = code[ctx.ip++] & 0x07;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t dst = fetchByte() & 0x07;
+                    uint8_t src = fetchByte() & 0x07;
                     ctx.regs[dst] = ctx.regs[src];
                     break;
                 }
 
                 case VM_OP_ADD: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    uint8_t dst = code[ctx.ip++] & 0x07;
-                    uint8_t src = code[ctx.ip++] & 0x07;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t dst = fetchByte() & 0x07;
+                    uint8_t src = fetchByte() & 0x07;
                     ctx.regs[dst] += ctx.regs[src];
                     break;
                 }
 
                 case VM_OP_SUB: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    uint8_t dst = code[ctx.ip++] & 0x07;
-                    uint8_t src = code[ctx.ip++] & 0x07;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t dst = fetchByte() & 0x07;
+                    uint8_t src = fetchByte() & 0x07;
                     ctx.regs[dst] -= ctx.regs[src];
                     break;
                 }
 
                 case VM_OP_XOR: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    uint8_t dst = code[ctx.ip++] & 0x07;
-                    uint8_t src = code[ctx.ip++] & 0x07;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t dst = fetchByte() & 0x07;
+                    uint8_t src = fetchByte() & 0x07;
                     ctx.regs[dst] ^= ctx.regs[src];
                     break;
                 }
 
                 case VM_OP_AND: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    uint8_t dst = code[ctx.ip++] & 0x07;
-                    uint8_t src = code[ctx.ip++] & 0x07;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t dst = fetchByte() & 0x07;
+                    uint8_t src = fetchByte() & 0x07;
                     ctx.regs[dst] &= ctx.regs[src];
                     break;
                 }
 
                 case VM_OP_OR: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    uint8_t dst = code[ctx.ip++] & 0x07;
-                    uint8_t src = code[ctx.ip++] & 0x07;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t dst = fetchByte() & 0x07;
+                    uint8_t src = fetchByte() & 0x07;
                     ctx.regs[dst] |= ctx.regs[src];
                     break;
                 }
 
                 case VM_OP_SHL: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    uint8_t dst = code[ctx.ip++] & 0x07;
-                    uint8_t shift = code[ctx.ip++] & 0x3F;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t dst = fetchByte() & 0x07;
+                    uint8_t shift = fetchByte() & 0x3F;
                     ctx.regs[dst] <<= shift;
                     break;
                 }
 
                 case VM_OP_SHR: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    uint8_t dst = code[ctx.ip++] & 0x07;
-                    uint8_t shift = code[ctx.ip++] & 0x3F;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t dst = fetchByte() & 0x07;
+                    uint8_t shift = fetchByte() & 0x3F;
                     ctx.regs[dst] >>= shift;
                     break;
                 }
 
                 case VM_OP_ROL: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    uint8_t dst = code[ctx.ip++] & 0x07;
-                    uint8_t shift = code[ctx.ip++] & 0x3F;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t dst = fetchByte() & 0x07;
+                    uint8_t shift = fetchByte() & 0x3F;
                     ctx.regs[dst] = _rotl64(ctx.regs[dst], shift);
                     break;
                 }
 
                 case VM_OP_ROR: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    uint8_t dst = code[ctx.ip++] & 0x07;
-                    uint8_t shift = code[ctx.ip++] & 0x3F;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t dst = fetchByte() & 0x07;
+                    uint8_t shift = fetchByte() & 0x3F;
                     ctx.regs[dst] = _rotr64(ctx.regs[dst], shift);
                     break;
                 }
 
                 case VM_OP_MBA_ADD: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    uint8_t dst = code[ctx.ip++] & 0x07;
-                    uint8_t src = code[ctx.ip++] & 0x07;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t dst = fetchByte() & 0x07;
+                    uint8_t src = fetchByte() & 0x07;
                     uint64_t x = ctx.regs[dst];
                     uint64_t y = ctx.regs[src];
                     ctx.regs[dst] = (x ^ y) + ((x & y) << 1);
@@ -173,9 +208,9 @@ namespace VM {
                 }
 
                 case VM_OP_MBA_SUB: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    uint8_t dst = code[ctx.ip++] & 0x07;
-                    uint8_t src = code[ctx.ip++] & 0x07;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t dst = fetchByte() & 0x07;
+                    uint8_t src = fetchByte() & 0x07;
                     uint64_t x = ctx.regs[dst];
                     uint64_t y = ctx.regs[src];
                     ctx.regs[dst] = (x ^ y) - ((~x & y) << 1);
@@ -183,9 +218,9 @@ namespace VM {
                 }
 
                 case VM_OP_MBA_XOR: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    uint8_t dst = code[ctx.ip++] & 0x07;
-                    uint8_t src = code[ctx.ip++] & 0x07;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t dst = fetchByte() & 0x07;
+                    uint8_t src = fetchByte() & 0x07;
                     uint64_t x = ctx.regs[dst];
                     uint64_t y = ctx.regs[src];
                     ctx.regs[dst] = (x | y) - (x & y);
@@ -193,48 +228,74 @@ namespace VM {
                 }
 
                 case VM_OP_PUSH: {
-                    if (ctx.ip + 1 > code.size() || ctx.sp >= 256) { ctx.running = false; break; }
-                    uint8_t reg = code[ctx.ip++] & 0x07;
+                    if (ctx.ip + 1 > size || ctx.sp >= 256) { ctx.running = false; break; }
+                    uint8_t reg = fetchByte() & 0x07;
                     ctx.stack[ctx.sp++] = ctx.regs[reg];
                     break;
                 }
 
                 case VM_OP_POP: {
-                    if (ctx.ip + 1 > code.size() || ctx.sp == 0) { ctx.running = false; break; }
-                    uint8_t reg = code[ctx.ip++] & 0x07;
+                    if (ctx.ip + 1 > size || ctx.sp == 0) { ctx.running = false; break; }
+                    uint8_t reg = fetchByte() & 0x07;
                     ctx.regs[reg] = ctx.stack[--ctx.sp];
                     break;
                 }
 
                 case VM_OP_CMP: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    uint8_t r1 = code[ctx.ip++] & 0x07;
-                    uint8_t r2 = code[ctx.ip++] & 0x07;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t r1 = fetchByte() & 0x07;
+                    uint8_t r2 = fetchByte() & 0x07;
                     ctx.flagZero = (ctx.regs[r1] == ctx.regs[r2]);
                     ctx.flagSign = (static_cast<int64_t>(ctx.regs[r1]) < static_cast<int64_t>(ctx.regs[r2]));
                     break;
                 }
 
                 case VM_OP_JMP: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    int16_t offset = static_cast<int16_t>(code[ctx.ip] | (code[ctx.ip + 1] << 8));
-                    ctx.ip += 2 + offset;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t b0 = fetchByte();
+                    uint8_t b1 = fetchByte();
+                    int16_t offset = static_cast<int16_t>(b0 | (b1 << 8));
+                    ctx.ip += offset;
                     break;
                 }
 
                 case VM_OP_JZ: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    int16_t offset = static_cast<int16_t>(code[ctx.ip] | (code[ctx.ip + 1] << 8));
-                    ctx.ip += 2;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t b0 = fetchByte();
+                    uint8_t b1 = fetchByte();
+                    int16_t offset = static_cast<int16_t>(b0 | (b1 << 8));
                     if (ctx.flagZero) ctx.ip += offset;
                     break;
                 }
 
                 case VM_OP_JNZ: {
-                    if (ctx.ip + 2 > code.size()) { ctx.running = false; break; }
-                    int16_t offset = static_cast<int16_t>(code[ctx.ip] | (code[ctx.ip + 1] << 8));
-                    ctx.ip += 2;
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t b0 = fetchByte();
+                    uint8_t b1 = fetchByte();
+                    int16_t offset = static_cast<int16_t>(b0 | (b1 << 8));
                     if (!ctx.flagZero) ctx.ip += offset;
+                    break;
+                }
+
+                case VM_OP_READ_MEM: {
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t dst = fetchByte() & 0x07;
+                    uint8_t src = fetchByte() & 0x07;
+                    uintptr_t addr = static_cast<uintptr_t>(ctx.regs[src]);
+                    if (addr >= 0x10000) {
+                        ctx.regs[dst] = *reinterpret_cast<const uint64_t*>(addr);
+                    }
+                    break;
+                }
+
+                case VM_OP_WRITE_MEM: {
+                    if (ctx.ip + 2 > size) { ctx.running = false; break; }
+                    uint8_t dst = fetchByte() & 0x07;
+                    uint8_t src = fetchByte() & 0x07;
+                    uintptr_t addr = static_cast<uintptr_t>(ctx.regs[dst]);
+                    if (addr >= 0x10000) {
+                        *reinterpret_cast<uint64_t*>(addr) = ctx.regs[src];
+                    }
                     break;
                 }
 
@@ -248,7 +309,6 @@ namespace VM {
                 }
             }
 
-            SecureZeroMemory(code.data(), code.size());
             return ctx.regs[0];
         }
     };
@@ -400,6 +460,20 @@ namespace VM {
             return *this;
         }
 
+        BytecodeBuilder& ReadMem(uint8_t dst, uint8_t src) {
+            m_raw.push_back(VM_OP_READ_MEM);
+            m_raw.push_back(dst & 0x07);
+            m_raw.push_back(src & 0x07);
+            return *this;
+        }
+
+        BytecodeBuilder& WriteMem(uint8_t dst, uint8_t src) {
+            m_raw.push_back(VM_OP_WRITE_MEM);
+            m_raw.push_back(dst & 0x07);
+            m_raw.push_back(src & 0x07);
+            return *this;
+        }
+
         BytecodeBuilder& Ret() {
             m_raw.push_back(VM_OP_RET);
             return *this;
@@ -407,10 +481,9 @@ namespace VM {
 
         std::vector<uint8_t> Build(uint8_t initialKey) const {
             std::vector<uint8_t> enc = m_raw;
-            uint8_t key = initialKey;
             for (size_t i = 0; i < enc.size(); ++i) {
-                enc[i] ^= key;
-                key = static_cast<uint8_t>((key * 33) + 7);
+                uint8_t k = static_cast<uint8_t>((initialKey * 33) + (i * 7) + 13);
+                enc[i] ^= k;
             }
             return enc;
         }

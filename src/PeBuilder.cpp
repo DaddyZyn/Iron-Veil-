@@ -464,7 +464,8 @@ namespace IronVeil {
         memcpy(rawBuffer.data() + secHeaderOffset, &newSec, sizeof(IMAGE_SECTION_HEADER));
         nt->FileHeader.NumberOfSections++;
 
-        nt->OptionalHeader.AddressOfEntryPoint = guardVa + configAlignedSize + stubEpOffsetInText;
+        uint32_t newEntryPoint = guardVa + configAlignedSize + stubEpOffsetInText;
+        nt->OptionalHeader.AddressOfEntryPoint = newEntryPoint;
         nt->OptionalHeader.SizeOfImage = guardVa + guardVirtualSize;
 
         if (m_options.stripImports && m_options.addDecoyImports && !decoyBlob.empty()) {
@@ -480,7 +481,7 @@ namespace IronVeil {
         rawBuffer.insert(rawBuffer.end(), guardPayload.begin(), guardPayload.end());
 
         outProtectedPe = rawBuffer;
-        std::cout << "[+] Protection build successful! New EntryPoint: 0x" << std::hex << nt->OptionalHeader.AddressOfEntryPoint << std::dec << std::endl;
+        std::cout << "[+] Protection build successful! New EntryPoint: 0x" << std::hex << newEntryPoint << std::dec << std::endl;
         return true;
     }
 

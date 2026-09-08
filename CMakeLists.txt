@@ -14,6 +14,7 @@ enable_language(ASM_MASM)
 
 add_library(IronVeilStub SHARED
     stub/StubEntry.asm
+    stub/SyscallStub.asm
     stub/StubMain.cpp
     src/Encryptor.cpp
 )
@@ -41,8 +42,9 @@ endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test/test_peb.cpp")
     add_executable(test_peb
         test/test_peb.cpp
+        stub/SyscallStub.asm
     )
-    target_compile_options(test_peb PRIVATE /W3 /O2)
+    target_compile_options(test_peb PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W3 /O2>)
     target_link_libraries(test_peb PRIVATE kernel32 user32)
 endif()
 

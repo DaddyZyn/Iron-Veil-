@@ -1,12 +1,13 @@
 #pragma once
 
 #include "DynamicResolver.hpp"
+#include "SyscallEngine.hpp"
 
 namespace IronVeil {
 
     class AntiDebug {
     public:
-        static bool PerformAllChecks(const ResolvedApis& apis, uint32_t flags) {
+        static bool PerformAllChecks(const ResolvedApis& apis, const SyscallContext& sysCtx, uint32_t flags) {
             if ((flags & ANTIDEBUG_HOOK_TAMPER) && CheckHookTampering(apis))
                 return true;
 
@@ -25,10 +26,10 @@ namespace IronVeil {
             if ((flags & ANTIDEBUG_KUSER_SHARED) && CheckKUserSharedData())
                 return true;
 
-            if ((flags & ANTIDEBUG_NTAPI) && CheckNtApi(apis))
+            if ((flags & ANTIDEBUG_NTAPI) && CheckNtApi(apis, sysCtx))
                 return true;
 
-            if ((flags & ANTIDEBUG_KERNEL_DEBUGGER) && CheckKernelDebugger(apis))
+            if ((flags & ANTIDEBUG_KERNEL_DEBUGGER) && CheckKernelDebugger(apis, sysCtx))
                 return true;
 
             if ((flags & ANTIDEBUG_HARDWARE_BP) && CheckHardwareBreakpoints(apis))
@@ -37,11 +38,24 @@ namespace IronVeil {
             if ((flags & ANTIDEBUG_TIMING_RDTSC) && CheckTiming())
                 return true;
 
+            if ((flags & ANTIDEBUG_HYPERVISOR) && CheckHypervisor())
+                return true;
+
             if (flags & ANTIDEBUG_THREAD_CLOAK) {
-                CloakCurrentThread(apis);
+                CloakCurrentThread(apis, sysCtx);
+            }
+
+            if (flags & ANTIDEBUG_PROCESS_DACL) {
+                HardenProcessDacl(apis);
             }
 
             return false;
+        }
+
+        static bool PerformAllChecks(const ResolvedApis& apis, uint32_t flags) {
+            SyscallContext sysCtx = { 0 };
+            SyscallEngine::Initialize(sysCtx);
+            return PerformAllChecks(apis, sysCtx, flags);
         }
 
 
@@ -188,18 +202,26 @@ namespace IronVeil {
             BOOLEAN KernelDebuggerNotPresent;
         };
 
-        static bool CheckKernelDebugger(const ResolvedApis& apis) {
-            if (!apis.NtQuerySystemInformation)
-                return false;
-
+        static bool CheckKernelDebugger(const ResolvedApis& apis, const SyscallContext& sysCtx) {
             SYSTEM_KERNEL_DEBUGGER_INFORMATION info = { 0, 0 };
             ULONG retLen = 0;
-            NTSTATUS status = apis.NtQuerySystemInformation(35, &info, sizeof(info), &retLen);
+            NTSTATUS status = -1;
+            if (sysCtx.initialized) {
+                status = sysCtx.NtQuerySystemInformation(35, &info, sizeof(info), &retLen);
+            }
+            if (status != 0 && apis.NtQuerySystemInformation) {
+                status = apis.NtQuerySystemInformation(35, &info, sizeof(info), &retLen);
+            }
             if (status == 0) {
                 if (info.KernelDebuggerEnabled && !info.KernelDebuggerNotPresent)
                     return true;
             }
             return false;
+        }
+
+        static bool CheckKernelDebugger(const ResolvedApis& apis) {
+            SyscallContext sysCtx = { 0 };
+            return CheckKernelDebugger(apis, sysCtx);
         }
 
         static bool CheckPeb() {
@@ -226,31 +248,48 @@ namespace IronVeil {
             return false;
         }
 
-        static bool CheckNtApi(const ResolvedApis& apis) {
-            if (!apis.NtQueryInformationProcess || !apis.GetCurrentProcess)
-                return false;
-
-            HANDLE hProcess = apis.GetCurrentProcess();
+        static bool CheckNtApi(const ResolvedApis& apis, const SyscallContext& sysCtx) {
+            HANDLE hProcess = apis.GetCurrentProcess ? apis.GetCurrentProcess() : reinterpret_cast<HANDLE>(-1);
 
             uint64_t debugPort = 0;
-            NTSTATUS status = apis.NtQueryInformationProcess(
-                hProcess, ProcessDebugPort, &debugPort, sizeof(debugPort), nullptr);
+            NTSTATUS status = -1;
+            if (sysCtx.initialized) {
+                status = sysCtx.NtQueryInformationProcess(hProcess, ProcessDebugPort, &debugPort, sizeof(debugPort), nullptr);
+            }
+            if (status != 0 && apis.NtQueryInformationProcess) {
+                status = apis.NtQueryInformationProcess(hProcess, ProcessDebugPort, &debugPort, sizeof(debugPort), nullptr);
+            }
             if (status == 0 && debugPort != 0)
                 return true;
 
             uint32_t debugFlags = 1;
-            status = apis.NtQueryInformationProcess(
-                hProcess, ProcessDebugFlags, &debugFlags, sizeof(debugFlags), nullptr);
+            status = -1;
+            if (sysCtx.initialized) {
+                status = sysCtx.NtQueryInformationProcess(hProcess, ProcessDebugFlags, &debugFlags, sizeof(debugFlags), nullptr);
+            }
+            if (status != 0 && apis.NtQueryInformationProcess) {
+                status = apis.NtQueryInformationProcess(hProcess, ProcessDebugFlags, &debugFlags, sizeof(debugFlags), nullptr);
+            }
             if (status == 0 && debugFlags == 0)
                 return true;
 
             HANDLE debugObject = nullptr;
-            status = apis.NtQueryInformationProcess(
-                hProcess, ProcessDebugObjectHandle, &debugObject, sizeof(debugObject), nullptr);
+            status = -1;
+            if (sysCtx.initialized) {
+                status = sysCtx.NtQueryInformationProcess(hProcess, ProcessDebugObjectHandle, &debugObject, sizeof(debugObject), nullptr);
+            }
+            if (status != 0 && apis.NtQueryInformationProcess) {
+                status = apis.NtQueryInformationProcess(hProcess, ProcessDebugObjectHandle, &debugObject, sizeof(debugObject), nullptr);
+            }
             if (status == 0 && debugObject != nullptr)
                 return true;
 
             return false;
+        }
+
+        static bool CheckNtApi(const ResolvedApis& apis) {
+            SyscallContext sysCtx = { 0 };
+            return CheckNtApi(apis, sysCtx);
         }
 
         static bool CheckHardwareBreakpoints(const ResolvedApis& apis) {
@@ -290,9 +329,74 @@ namespace IronVeil {
             return false;
         }
 
+        static bool CheckHypervisor() {
+            int cpuInfo[4] = { 0 };
+            __cpuid(cpuInfo, 1);
+            if ((cpuInfo[2] & (1 << 31)) != 0) {
+                __cpuid(cpuInfo, 0x40000000);
+                char vendor[13] = { 0 };
+                *reinterpret_cast<int*>(vendor + 0) = cpuInfo[1];
+                *reinterpret_cast<int*>(vendor + 4) = cpuInfo[2];
+                *reinterpret_cast<int*>(vendor + 8) = cpuInfo[3];
+                vendor[12] = '\0';
+
+                constexpr uint32_t HASH_VMWARE = HashDJB2("VMwareVMware");
+                constexpr uint32_t HASH_VBOX   = HashDJB2("VBoxVBoxVBox");
+                constexpr uint32_t HASH_KVM    = HashDJB2("KVMKVMKVM");
+                constexpr uint32_t HASH_XEN    = HashDJB2("XenVMMXenVMM");
+
+                uint32_t vHash = HashDJB2(vendor);
+                if (vHash == HASH_VMWARE || vHash == HASH_VBOX || vHash == HASH_KVM || vHash == HASH_XEN) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static void CloakCurrentThread(const ResolvedApis& apis, const SyscallContext& sysCtx) {
+            HANDLE hThread = apis.GetCurrentThread ? apis.GetCurrentThread() : reinterpret_cast<HANDLE>(-2);
+            if (sysCtx.initialized) {
+                sysCtx.NtSetInformationThread(hThread, ThreadHideFromDebugger, nullptr, 0);
+            } else if (apis.NtSetInformationThread) {
+                apis.NtSetInformationThread(hThread, ThreadHideFromDebugger, nullptr, 0);
+            }
+        }
+
         static void CloakCurrentThread(const ResolvedApis& apis) {
-            if (apis.NtSetInformationThread && apis.GetCurrentThread) {
-                apis.NtSetInformationThread(apis.GetCurrentThread(), ThreadHideFromDebugger, nullptr, 0);
+            SyscallContext sysCtx = { 0 };
+            CloakCurrentThread(apis, sysCtx);
+        }
+
+        static void HardenProcessDacl(const ResolvedApis& apis) {
+            constexpr uint32_t HASH_ADVAPI32 = HashDJB2CaseInsensitive("advapi32.dll");
+            HMODULE hAdvapi = DynamicResolver::FindModuleByHash(HASH_ADVAPI32);
+            if (!hAdvapi && apis.LoadLibraryA) {
+                hAdvapi = apis.LoadLibraryA("advapi32.dll");
+            }
+            if (!hAdvapi) return;
+
+            using t_ConvertStringSD = BOOL(WINAPI*)(LPCSTR, DWORD, PSECURITY_DESCRIPTOR*, PULONG);
+            using t_SetKernelObjectSecurity = BOOL(WINAPI*)(HANDLE, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR);
+            using t_LocalFree = HLOCAL(WINAPI*)(HLOCAL);
+
+            auto fnConvert = reinterpret_cast<t_ConvertStringSD>(
+                DynamicResolver::FindExportByHash(hAdvapi, HashDJB2("ConvertStringSecurityDescriptorToSecurityDescriptorA")));
+            auto fnSetSec = reinterpret_cast<t_SetKernelObjectSecurity>(
+                DynamicResolver::FindExportByHash(hAdvapi, HashDJB2("SetKernelObjectSecurity")));
+
+            constexpr uint32_t HASH_KERNEL32 = HashDJB2CaseInsensitive("kernel32.dll");
+            HMODULE hKernel32 = DynamicResolver::FindModuleByHash(HASH_KERNEL32);
+            auto fnLocalFree = hKernel32 ? reinterpret_cast<t_LocalFree>(
+                DynamicResolver::FindExportByHash(hKernel32, HashDJB2("LocalFree"))) : nullptr;
+
+            if (fnConvert && fnSetSec && apis.GetCurrentProcess) {
+                PSECURITY_DESCRIPTOR pSD = nullptr;
+                if (fnConvert("D:(D;;0x0010;;;WD)(D;;0x0020;;;WD)(A;;GA;;;OW)", 1, &pSD, nullptr)) {
+                    fnSetSec(apis.GetCurrentProcess(), DACL_SECURITY_INFORMATION, pSD);
+                    if (fnLocalFree && pSD) {
+                        fnLocalFree(pSD);
+                    }
+                }
             }
         }
     };

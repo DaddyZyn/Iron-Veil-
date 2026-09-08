@@ -31,7 +31,9 @@ namespace IronVeil {
         ANTIDEBUG_NETWORK_HOOKS      = (1 << 10),
         ANTIDEBUG_VM_MEMORY_HOOKS    = (1 << 11),
         ANTIDEBUG_ANTI_DUMP          = (1 << 12),
-        ANTIDEBUG_ALL                = 0x1FFF
+        ANTIDEBUG_HYPERVISOR         = (1 << 13),
+        ANTIDEBUG_PROCESS_DACL       = (1 << 14),
+        ANTIDEBUG_ALL                = 0x7FFF
     };
 
     #pragma pack(push, 1)

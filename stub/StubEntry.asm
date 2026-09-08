@@ -100,4 +100,23 @@ IronVeilDecoyLicense PROC
     ret
 IronVeilDecoyLicense ENDP
 
+
+PUBLIC __chkstk
+__chkstk PROC
+    push rcx
+    push r10
+    push r11
+    lea r10, [rsp + 20h]
+probe_loop:
+    sub r10, 1000h
+    test dword ptr [r10], 0
+    sub rax, 1000h
+    cmp rax, 1000h
+    ja probe_loop
+    pop r11
+    pop r10
+    pop rcx
+    ret
+__chkstk ENDP
+
 END
