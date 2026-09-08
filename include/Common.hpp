@@ -67,6 +67,11 @@ namespace IronVeil {
         uint8_t  pdataNonce[12];
         uint32_t antiDebugFlags;
         ProtectedSectionInfo sections[16];
+        uintptr_t fnVirtualProtect;
+        uintptr_t fnFlushInstructionCache;
+        uintptr_t vehActivePage;
+        uintptr_t vehActivePagePrev;
+        uint8_t   vehPageDecrypted[256];
     };
     #pragma pack(pop)
 

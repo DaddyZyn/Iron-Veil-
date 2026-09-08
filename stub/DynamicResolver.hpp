@@ -76,6 +76,8 @@ namespace IronVeil {
 
     using t_PIMAGE_TLS_CALLBACK = void(NTAPI*)(PVOID DllHandle, DWORD Reason, PVOID Reserved);
     using t_RtlAddFunctionTable = BOOLEAN(NTAPI*)(PRUNTIME_FUNCTION FunctionTable, DWORD EntryCount, DWORD64 BaseAddress);
+    using t_AddVectoredExceptionHandler = PVOID(WINAPI*)(ULONG First, PVECTORED_EXCEPTION_HANDLER Handler);
+    using t_RemoveVectoredExceptionHandler = ULONG(WINAPI*)(PVOID Handle);
 
     struct ResolvedApis {
         t_VirtualProtect VirtualProtect = nullptr;
@@ -85,6 +87,8 @@ namespace IronVeil {
         t_GetProcAddress GetProcAddress = nullptr;
         t_ExitProcess ExitProcess = nullptr;
         t_RtlAddFunctionTable RtlAddFunctionTable = nullptr;
+        t_AddVectoredExceptionHandler AddVectoredExceptionHandler = nullptr;
+        t_RemoveVectoredExceptionHandler RemoveVectoredExceptionHandler = nullptr;
         t_GetCurrentProcess GetCurrentProcess = nullptr;
         t_GetCurrentThread GetCurrentThread = nullptr;
         t_GetThreadContext GetThreadContext = nullptr;
@@ -361,6 +365,20 @@ namespace IronVeil {
                 resolveK(HashDJB2("SetThreadContext")));
             outApis.FlushInstructionCache = reinterpret_cast<t_FlushInstructionCache>(
                 resolveK(HashDJB2("FlushInstructionCache")));
+
+            outApis.AddVectoredExceptionHandler = reinterpret_cast<t_AddVectoredExceptionHandler>(
+                resolveK(HashDJB2("AddVectoredExceptionHandler")));
+            if (!outApis.AddVectoredExceptionHandler) {
+                outApis.AddVectoredExceptionHandler = reinterpret_cast<t_AddVectoredExceptionHandler>(
+                    FindExportByHash(hNtdll, HashDJB2("RtlAddVectoredExceptionHandler")));
+            }
+
+            outApis.RemoveVectoredExceptionHandler = reinterpret_cast<t_RemoveVectoredExceptionHandler>(
+                resolveK(HashDJB2("RemoveVectoredExceptionHandler")));
+            if (!outApis.RemoveVectoredExceptionHandler) {
+                outApis.RemoveVectoredExceptionHandler = reinterpret_cast<t_RemoveVectoredExceptionHandler>(
+                    FindExportByHash(hNtdll, HashDJB2("RtlRemoveVectoredExceptionHandler")));
+            }
 
             outApis.RtlAddFunctionTable = reinterpret_cast<t_RtlAddFunctionTable>(
                 FindExportByHash(hNtdll, HashDJB2("RtlAddFunctionTable")));

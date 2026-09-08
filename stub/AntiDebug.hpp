@@ -81,60 +81,46 @@ namespace IronVeil {
         }
 
         static bool CheckHookTampering(const ResolvedApis& apis) {
-            const void* targets[] = {
-                reinterpret_cast<const void*>(apis.NtQueryInformationProcess),
-                reinterpret_cast<const void*>(apis.NtSetInformationThread),
-                reinterpret_cast<const void*>(apis.NtQuerySystemInformation),
-                reinterpret_cast<const void*>(apis.NtProtectVirtualMemory),
-                reinterpret_cast<const void*>(apis.NtAllocateVirtualMemory),
-                reinterpret_cast<const void*>(apis.VirtualProtect),
-                reinterpret_cast<const void*>(apis.VirtualAlloc),
-                reinterpret_cast<const void*>(apis.VirtualQuery),
-                reinterpret_cast<const void*>(apis.LoadLibraryA),
-                reinterpret_cast<const void*>(apis.GetProcAddress),
-                reinterpret_cast<const void*>(apis.pNtOpenProcess),
-                reinterpret_cast<const void*>(apis.pNtCreateThreadEx),
-                reinterpret_cast<const void*>(apis.pNtTerminateProcess),
-                reinterpret_cast<const void*>(apis.pNtReadVirtualMemory),
-                reinterpret_cast<const void*>(apis.pNtWriteVirtualMemory),
-                reinterpret_cast<const void*>(apis.pLdrLoadDll),
-                reinterpret_cast<const void*>(apis.pLdrGetProcedureAddress)
-            };
-
-            for (const auto* target : targets) {
-                if (target && IsFunctionHooked(target))
-                    return true;
-            }
-
+            #define CHK_PTR(fn) if (IsFunctionHooked(reinterpret_cast<const void*>(fn))) return true;
+            CHK_PTR(apis.NtQueryInformationProcess);
+            CHK_PTR(apis.NtSetInformationThread);
+            CHK_PTR(apis.NtQuerySystemInformation);
+            CHK_PTR(apis.NtProtectVirtualMemory);
+            CHK_PTR(apis.NtAllocateVirtualMemory);
+            CHK_PTR(apis.VirtualProtect);
+            CHK_PTR(apis.VirtualAlloc);
+            CHK_PTR(apis.VirtualQuery);
+            CHK_PTR(apis.LoadLibraryA);
+            CHK_PTR(apis.GetProcAddress);
+            CHK_PTR(apis.pNtOpenProcess);
+            CHK_PTR(apis.pNtCreateThreadEx);
+            CHK_PTR(apis.pNtTerminateProcess);
+            CHK_PTR(apis.pNtReadVirtualMemory);
+            CHK_PTR(apis.pNtWriteVirtualMemory);
+            CHK_PTR(apis.pLdrLoadDll);
+            CHK_PTR(apis.pLdrGetProcedureAddress);
+            #undef CHK_PTR
             return false;
         }
 
         static bool CheckSyscallHooks(const ResolvedApis& apis) {
-            auto isSyscallTampered = [](const void* pFunc) -> bool {
-                if (!pFunc) return false;
-                const auto* b = static_cast<const uint8_t*>(pFunc);
-                if (b[0] == 0xE9 || b[0] == 0xCC || (b[0] == 0xFF && b[1] == 0x25))
-                    return true;
-                return false;
+            auto isHooked = [](const void* p) -> bool {
+                if (!p) return false;
+                const auto* b = static_cast<const uint8_t*>(p);
+                return (b[0] == 0xE9 || b[0] == 0xCC || (b[0] == 0xFF && b[1] == 0x25));
             };
 
-            const void* syscallTargets[] = {
-                reinterpret_cast<const void*>(apis.NtQueryInformationProcess),
-                reinterpret_cast<const void*>(apis.NtSetInformationThread),
-                reinterpret_cast<const void*>(apis.NtQuerySystemInformation),
-                reinterpret_cast<const void*>(apis.NtProtectVirtualMemory),
-                reinterpret_cast<const void*>(apis.NtAllocateVirtualMemory),
-                reinterpret_cast<const void*>(apis.pNtOpenProcess),
-                reinterpret_cast<const void*>(apis.pNtTerminateProcess),
-                reinterpret_cast<const void*>(apis.pNtReadVirtualMemory),
-                reinterpret_cast<const void*>(apis.pNtWriteVirtualMemory)
-            };
-
-            for (const auto* target : syscallTargets) {
-                if (target && isSyscallTampered(target))
-                    return true;
-            }
-
+            #define CHK_SC(fn) if (isHooked(reinterpret_cast<const void*>(fn))) return true;
+            CHK_SC(apis.NtQueryInformationProcess);
+            CHK_SC(apis.NtSetInformationThread);
+            CHK_SC(apis.NtQuerySystemInformation);
+            CHK_SC(apis.NtProtectVirtualMemory);
+            CHK_SC(apis.NtAllocateVirtualMemory);
+            CHK_SC(apis.pNtOpenProcess);
+            CHK_SC(apis.pNtTerminateProcess);
+            CHK_SC(apis.pNtReadVirtualMemory);
+            CHK_SC(apis.pNtWriteVirtualMemory);
+            #undef CHK_SC
             return false;
         }
 
@@ -287,18 +273,21 @@ namespace IronVeil {
         }
 
         static bool CheckTiming() {
-            uint64_t minCycles = static_cast<uint64_t>(-1);
-            for (int i = 0; i < 5; ++i) {
-                unsigned int aux = 0;
-                uint64_t t1 = __rdtscp(&aux);
-                _mm_pause();
-                uint64_t t2 = __rdtscp(&aux);
-                uint64_t diff = t2 - t1;
-                if (diff < minCycles) {
-                    minCycles = diff;
-                }
+            unsigned int aux = 0;
+            uint64_t t1 = __rdtscp(&aux);
+            volatile uint64_t hash = 0xCBF29CE484222325ULL;
+            for (int i = 0; i < 64; ++i) {
+                hash = (hash ^ (i * 0x5A)) * 0x100000001B3ULL;
             }
-            return (minCycles > 0x10000);
+            uint64_t t2 = __rdtscp(&aux);
+            if ((t2 - t1) > 0x80000 || hash == 0) return true;
+
+            uint32_t tick1 = *reinterpret_cast<volatile uint32_t*>(0x7FFE0320);
+            for (volatile int k = 0; k < 5000; ++k);
+            uint32_t tick2 = *reinterpret_cast<volatile uint32_t*>(0x7FFE0320);
+            if ((tick2 - tick1) > 100) return true;
+
+            return false;
         }
 
         static void CloakCurrentThread(const ResolvedApis& apis) {

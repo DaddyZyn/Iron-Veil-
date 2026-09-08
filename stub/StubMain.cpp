@@ -21,6 +21,81 @@ extern "C" {
 
 namespace IronVeil {
 
+    __declspec(noinline) static StubConfig* GetGuardConfig() {
+        uintptr_t scan = reinterpret_cast<uintptr_t>(&GetGuardConfig) & ~0xFFFULL;
+        for (int i = 0; i < 8; ++i) {
+            auto* testCfg = reinterpret_cast<StubConfig*>(scan);
+            if (testCfg->magic == STUB_MAGIC && testCfg->version == STUB_VERSION) {
+                return testCfg;
+            }
+            scan -= 0x1000;
+        }
+        return nullptr;
+    }
+
+    static LONG WINAPI IronVeilVehHandler(PEXCEPTION_POINTERS pEx) {
+        if (!pEx || !pEx->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
+
+        DWORD code = pEx->ExceptionRecord->ExceptionCode;
+        if (code != 0x80000001 && code != 0xC0000005) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+
+        uintptr_t fault = (pEx->ExceptionRecord->NumberParameters >= 2) ?
+            static_cast<uintptr_t>(pEx->ExceptionRecord->ExceptionInformation[1]) :
+            reinterpret_cast<uintptr_t>(pEx->ExceptionRecord->ExceptionAddress);
+
+        auto* cfg = GetGuardConfig();
+        if (!cfg || !cfg->fnVirtualProtect) return EXCEPTION_CONTINUE_SEARCH;
+
+        uintptr_t imageBase = DynamicResolver::GetImageBase();
+        if (!imageBase) return EXCEPTION_CONTINUE_SEARCH;
+
+        uintptr_t textStart = imageBase + cfg->sections[0].virtualAddress;
+        uintptr_t textEnd = textStart + cfg->sections[0].virtualSize;
+
+        if (fault >= textStart && fault < textEnd) {
+            uintptr_t page = fault & ~0xFFFULL;
+            size_t pageIdx = (page - textStart) / 0x1000;
+            if (pageIdx >= sizeof(cfg->vehPageDecrypted)) {
+                return EXCEPTION_CONTINUE_SEARCH;
+            }
+
+            auto pfnProtect = reinterpret_cast<t_VirtualProtect>(cfg->fnVirtualProtect);
+            auto pfnFlush = reinterpret_cast<t_FlushInstructionCache>(cfg->fnFlushInstructionCache);
+
+            DWORD oldP = 0;
+
+            if (page != cfg->vehActivePage && page != cfg->vehActivePagePrev) {
+                if (cfg->vehActivePagePrev) {
+                    pfnProtect(reinterpret_cast<LPVOID>(cfg->vehActivePagePrev), 0x1000, 
+                               PAGE_EXECUTE_READ | PAGE_GUARD, &oldP);
+                }
+                cfg->vehActivePagePrev = cfg->vehActivePage;
+                cfg->vehActivePage = page;
+            }
+
+            if (!cfg->vehPageDecrypted[pageIdx]) {
+                if (pfnProtect(reinterpret_cast<LPVOID>(page), 0x1000, PAGE_READWRITE, &oldP)) {
+                    uint32_t blockCounter = static_cast<uint32_t>(pageIdx * 64);
+                    ChaCha20::CryptInPlace(cfg->encryptionKey, cfg->sections[0].nonce, blockCounter, 
+                                           reinterpret_cast<uint8_t*>(page), 0x1000);
+                    cfg->vehPageDecrypted[pageIdx] = 1;
+                }
+            }
+
+            pfnProtect(reinterpret_cast<LPVOID>(page), 0x1000, PAGE_EXECUTE_READ, &oldP);
+
+            if (pfnFlush) {
+                pfnFlush(reinterpret_cast<HANDLE>(static_cast<intptr_t>(-1)), reinterpret_cast<LPCVOID>(page), 0x1000);
+            }
+
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
     extern "C" __declspec(dllexport) uintptr_t StubMainWorker() {
         uintptr_t imageBase = DynamicResolver::GetImageBase();
         if (!imageBase)
@@ -56,6 +131,11 @@ namespace IronVeil {
         ResolvedApis apis;
         if (!DynamicResolver::ResolveAll(apis))
             return 0;
+
+        DWORD cfgOldProtect = 0;
+        apis.VirtualProtect(config, sizeof(StubConfig), PAGE_READWRITE, &cfgOldProtect);
+        config->fnVirtualProtect = reinterpret_cast<uintptr_t>(apis.VirtualProtect);
+        config->fnFlushInstructionCache = reinterpret_cast<uintptr_t>(apis.FlushInstructionCache);
 
         if (AntiDebug::PerformAllChecks(apis, config->antiDebugFlags)) {
             apis.ExitProcess(0);
@@ -241,16 +321,44 @@ namespace IronVeil {
         }
 
         if (config->textHash != 0 && config->sectionCount > 0) {
-            const auto& firstSec = config->sections[0];
-            uint8_t* pText = reinterpret_cast<uint8_t*>(imageBase + firstSec.virtualAddress);
-            uint64_t currentHash = HashFNV1a64(pText, firstSec.rawSize);
-            if (currentHash != config->textHash) {
-                apis.ExitProcess(0);
-                return 0;
+            intptr_t delta = static_cast<intptr_t>(imageBase) - static_cast<intptr_t>(config->originalImageBase);
+            if (delta == 0) {
+                const auto& firstSec = config->sections[0];
+                uint8_t* pText = reinterpret_cast<uint8_t*>(imageBase + firstSec.virtualAddress);
+                uint64_t currentHash = HashFNV1a64(pText, firstSec.rawSize);
+                if (currentHash != config->textHash) {
+                    apis.ExitProcess(0);
+                    return 0;
+                }
             }
         }
 
         uintptr_t realOep = imageBase + config->originalEntryPoint;
+
+        if (apis.AddVectoredExceptionHandler && config->sectionCount > 0) {
+            const auto& textSec = config->sections[0];
+            uint32_t pageCount = static_cast<uint32_t>((textSec.virtualSize + 0xFFF) / 0x1000);
+            memset(config->vehPageDecrypted, 0, sizeof(config->vehPageDecrypted));
+
+            uintptr_t oepPage = realOep & ~0xFFFULL;
+            config->vehActivePage = oepPage;
+            config->vehActivePagePrev = 0;
+
+            for (uint32_t p = 0; p < pageCount && p < sizeof(config->vehPageDecrypted); ++p) {
+                uintptr_t pageAddr = imageBase + textSec.virtualAddress + (p * 0x1000);
+                if (pageAddr == oepPage) {
+                    config->vehPageDecrypted[p] = 1;
+                } else {
+                    uint32_t blockCounter = p * 64;
+                    DWORD oldP = 0;
+                    apis.VirtualProtect(reinterpret_cast<LPVOID>(pageAddr), 0x1000, PAGE_READWRITE, &oldP);
+                    ChaCha20::CryptInPlace(config->encryptionKey, textSec.nonce, blockCounter, reinterpret_cast<uint8_t*>(pageAddr), 0x1000);
+                    apis.VirtualProtect(reinterpret_cast<LPVOID>(pageAddr), 0x1000, PAGE_EXECUTE_READ | PAGE_GUARD, &oldP);
+                }
+            }
+
+            apis.AddVectoredExceptionHandler(1, IronVeilVehHandler);
+        }
 
         if (config->antiDebugFlags & ANTIDEBUG_ANTI_DUMP) {
             auto* dosHeader = reinterpret_cast<IMAGE_DOS_HEADER*>(imageBase);
@@ -272,21 +380,10 @@ namespace IronVeil {
             }
         }
 
-        DWORD cfgOldProtect = 0;
-        if (apis.VirtualProtect(config, sizeof(StubConfig), PAGE_READWRITE, &cfgOldProtect)) {
-            memset(config->encryptionKey, 0, sizeof(config->encryptionKey));
-            memset(config->importsNonce, 0, sizeof(config->importsNonce));
-            memset(config->relocsNonce, 0, sizeof(config->relocsNonce));
-            memset(config->tlsNonce, 0, sizeof(config->tlsNonce));
-            memset(config->pdataNonce, 0, sizeof(config->pdataNonce));
-            config->magic = 0;
-            config->version = 0;
-            config->originalEntryPoint = 0;
-            config->textHash = 0;
-            memset(config->sections, 0, sizeof(config->sections));
-            memset(config, 0, sizeof(StubConfig));
-            apis.VirtualProtect(config, sizeof(StubConfig), PAGE_NOACCESS, &cfgOldProtect);
-        }
+        memset(config->importsNonce, 0, sizeof(config->importsNonce));
+        memset(config->relocsNonce, 0, sizeof(config->relocsNonce));
+        memset(config->tlsNonce, 0, sizeof(config->tlsNonce));
+        memset(config->pdataNonce, 0, sizeof(config->pdataNonce));
 
         return realOep;
     }

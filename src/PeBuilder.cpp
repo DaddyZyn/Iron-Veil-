@@ -453,7 +453,7 @@ namespace IronVeil {
         newSec.Misc.VirtualSize = guardVirtualSize;
         newSec.PointerToRawData = guardRawOffset;
         newSec.SizeOfRawData = guardRawSize;
-        newSec.Characteristics = IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_CNT_CODE;
+        newSec.Characteristics = IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_CNT_CODE;
 
         size_t secHeaderOffset = reinterpret_cast<uint8_t*>(&sections[nt->FileHeader.NumberOfSections]) - rawBuffer.data();
         if (secHeaderOffset + sizeof(IMAGE_SECTION_HEADER) > nt->OptionalHeader.SizeOfHeaders) {
