@@ -113,15 +113,30 @@ namespace IronVeil {
 
     class DynamicResolver {
     public:
+        __forceinline static uint8_t* GetPeb() {
+            volatile unsigned long offset = 0x28;
+            offset += 0x38; // 0x60
+            return reinterpret_cast<uint8_t*>(__readgsqword(offset));
+        }
+
         static uintptr_t GetImageBase() {
-            auto* peb = reinterpret_cast<uint8_t*>(__readgsqword(0x60));
-            return *reinterpret_cast<uintptr_t*>(peb + 0x10);
+            auto* peb = GetPeb();
+            if (!peb) return 0;
+            volatile size_t baseOffset = 0x08;
+            baseOffset <<= 1; // 0x10
+            return *reinterpret_cast<uintptr_t*>(peb + baseOffset);
         }
 
         static HMODULE FindModuleByHash(uint32_t nameHash) {
-            auto* peb = reinterpret_cast<uint8_t*>(__readgsqword(0x60));
-            auto* ldr = *reinterpret_cast<uint8_t**>(peb + 0x18);
-            auto* head = reinterpret_cast<LIST_ENTRY*>(ldr + 0x20);
+            auto* peb = GetPeb();
+            if (!peb) return nullptr;
+            volatile size_t ldrOffset = 0x0C;
+            ldrOffset <<= 1; // 0x18
+            auto* ldr = *reinterpret_cast<uint8_t**>(peb + ldrOffset);
+            if (!ldr) return nullptr;
+            volatile size_t listOffset = 0x10;
+            listOffset <<= 1; // 0x20
+            auto* head = reinterpret_cast<LIST_ENTRY*>(ldr + listOffset);
 
             for (auto* curr = head->Flink; curr != head; curr = curr->Flink) {
                 auto* entry = reinterpret_cast<uint8_t*>(curr) - 0x10;
@@ -148,13 +163,17 @@ namespace IronVeil {
         static bool IsAddressInAnyModule(uintptr_t addr) {
             if (!addr)
                 return false;
-            auto* peb = reinterpret_cast<uint8_t*>(__readgsqword(0x60));
+            auto* peb = GetPeb();
             if (!peb)
                 return false;
-            auto* ldr = *reinterpret_cast<uint8_t**>(peb + 0x18);
+            volatile size_t ldrOffset = 0x0C;
+            ldrOffset <<= 1; // 0x18
+            auto* ldr = *reinterpret_cast<uint8_t**>(peb + ldrOffset);
             if (!ldr)
                 return false;
-            auto* head = reinterpret_cast<LIST_ENTRY*>(ldr + 0x20);
+            volatile size_t listOffset = 0x10;
+            listOffset <<= 1; // 0x20
+            auto* head = reinterpret_cast<LIST_ENTRY*>(ldr + listOffset);
             if (!head)
                 return false;
 

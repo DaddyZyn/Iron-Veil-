@@ -16,7 +16,7 @@ namespace IronVeil {
         bool handleRelocations = true;
         bool handleTlsCallbacks = true;
         uint32_t antiDebugFlags = ANTIDEBUG_ALL;
-        std::string sectionName = ".guard";
+        std::string sectionName = ".rdata";
     };
 
     class PeBuilder {

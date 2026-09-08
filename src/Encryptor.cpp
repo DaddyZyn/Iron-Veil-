@@ -18,7 +18,18 @@ namespace IronVeil {
 
     void ChaCha20::Process(const uint8_t key[32], const uint8_t nonce[12], uint32_t counter, 
                            const uint8_t* input, uint8_t* output, size_t length) {
-        const uint32_t constants[4] = { 0x61707865, 0x3320646e, 0x79622d32, 0x6b206574 };
+        // De-signature ChaCha20 constants "expand 32-byte k" to prevent static Capa/YARA T1027 matches
+        volatile uint32_t mask0 = 0x5A827999;
+        volatile uint32_t mask1 = 0x6ED9EBA1;
+        volatile uint32_t mask2 = 0x8F1BBCDC;
+        volatile uint32_t mask3 = 0xCA62C1D6;
+
+        const uint32_t constants[4] = {
+            0x3BF201FCu ^ mask0, // 0x61707865 ("expa")
+            0x5DF98FCFu ^ mask1, // 0x3320646e ("nd 3")
+            0xF67991EEu ^ mask2, // 0x79622d32 ("2-by")
+            0xA142A4A2u ^ mask3  // 0x6b206574 ("te k")
+        };
 
         const auto* k = reinterpret_cast<const uint32_t*>(key);
         const auto* n = reinterpret_cast<const uint32_t*>(nonce);

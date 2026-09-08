@@ -15,7 +15,7 @@ void PrintUsage() {
               << "  --no-antidebug        Disable all runtime anti-debugging checks\n"
               << "  --no-relocs           Do not preserve and process base relocations\n"
               << "  --no-tls              Do not process TLS callbacks\n"
-              << "  --section-name <str>  Custom name for the injected stub section (default: .guard)\n"
+              << "  --section-name <str>  Custom name for the injected stub section (default: .rdata)\n"
               << "  --help                Display this help menu\n\n";
 }
 

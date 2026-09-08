@@ -14,10 +14,6 @@ stage0:
     push r9
     sub rsp, 28h
 
-    mov r10, gs:[30h]
-    test r10, r10
-    jz dead_trap
-
     stc
     jc stage1
     db 0EBh, 0FFh

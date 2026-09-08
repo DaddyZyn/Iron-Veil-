@@ -101,81 +101,145 @@ namespace IronVeil {
                                       uint32_t& outIatRva, uint32_t& outIatSize) {
         outBlob.clear();
 
-        constexpr size_t descCount = 2;
-        constexpr size_t descTotalSize = descCount * sizeof(IMAGE_IMPORT_DESCRIPTOR);
-
-        constexpr size_t thunkCount = 4;
-        constexpr size_t thunkTotalSize = thunkCount * sizeof(uint64_t);
-
-        const char dllName[] = "KERNEL32.dll";
-        constexpr size_t dllNameSize = 13;
-
-        const char fn0[] = "GetSystemTimeAsFileTime";
-        const char fn1[] = "GetCurrentProcessId";
-        const char fn2[] = "QueryPerformanceCounter";
-
-        size_t fn0Size = 2 + strlen(fn0) + 1;
-        if (fn0Size % 2 != 0) fn0Size++;
-
-        size_t fn1Size = 2 + strlen(fn1) + 1;
-        if (fn1Size % 2 != 0) fn1Size++;
-
-        size_t fn2Size = 2 + strlen(fn2) + 1;
-        if (fn2Size % 2 != 0) fn2Size++;
-
-        uint32_t descOffset = 0;
-        uint32_t intOffset = static_cast<uint32_t>(descTotalSize);
-        uint32_t iatOffset = static_cast<uint32_t>(intOffset + thunkTotalSize);
-        uint32_t dllNameOffset = static_cast<uint32_t>(iatOffset + thunkTotalSize);
-
-        uint32_t namesOffset = dllNameOffset + static_cast<uint32_t>(dllNameSize);
-        if (namesOffset % 2 != 0) namesOffset++;
-
-        uint32_t fn0Offset = namesOffset;
-        uint32_t fn1Offset = fn0Offset + static_cast<uint32_t>(fn0Size);
-        uint32_t fn2Offset = fn1Offset + static_cast<uint32_t>(fn1Size);
-        uint32_t totalSize = fn2Offset + static_cast<uint32_t>(fn2Size);
-
-        while (totalSize % 16 != 0) totalSize++;
-
-        outBlob.resize(totalSize, 0);
-
-        auto* descriptors = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(outBlob.data() + descOffset);
-        descriptors[0].OriginalFirstThunk = baseRva + intOffset;
-        descriptors[0].TimeDateStamp = 0;
-        descriptors[0].ForwarderChain = 0;
-        descriptors[0].Name = baseRva + dllNameOffset;
-        descriptors[0].FirstThunk = baseRva + iatOffset;
-
-        auto* intTable = reinterpret_cast<uint64_t*>(outBlob.data() + intOffset);
-        auto* iatTable = reinterpret_cast<uint64_t*>(outBlob.data() + iatOffset);
-
-        intTable[0] = baseRva + fn0Offset;
-        intTable[1] = baseRva + fn1Offset;
-        intTable[2] = baseRva + fn2Offset;
-        intTable[3] = 0;
-
-        iatTable[0] = baseRva + fn0Offset;
-        iatTable[1] = baseRva + fn1Offset;
-        iatTable[2] = baseRva + fn2Offset;
-        iatTable[3] = 0;
-
-        memcpy(outBlob.data() + dllNameOffset, dllName, dllNameSize);
-
-        auto writeByName = [&](uint32_t off, const char* name) {
-            auto* p = outBlob.data() + off;
-            *reinterpret_cast<uint16_t*>(p) = 0;
-            memcpy(p + 2, name, strlen(name) + 1);
+        struct DecoyModule {
+            std::string dllName;
+            std::vector<std::string> functions;
         };
 
-        writeByName(fn0Offset, fn0);
-        writeByName(fn1Offset, fn1);
-        writeByName(fn2Offset, fn2);
+        const std::vector<DecoyModule> modules = {
+            {
+                "KERNEL32.dll",
+                {
+                    "InitializeSListHead",
+                    "GetSystemTimeAsFileTime",
+                    "GetCurrentProcessId",
+                    "GetCurrentThreadId",
+                    "QueryPerformanceCounter",
+                    "IsDebuggerPresent",
+                    "IsProcessorFeaturePresent",
+                    "TerminateProcess",
+                    "GetCurrentProcess",
+                    "SetUnhandledExceptionFilter",
+                    "UnhandledExceptionFilter",
+                    "RtlCaptureContext",
+                    "RtlLookupFunctionEntry",
+                    "RtlVirtualUnwind",
+                    "Sleep",
+                    "CloseHandle",
+                    "GetLastError",
+                    "SetLastError",
+                    "LocalFree",
+                    "FormatMessageW",
+                    "MultiByteToWideChar",
+                    "WideCharToMultiByte",
+                    "GetModuleHandleW",
+                    "GetProcAddress",
+                    "VirtualQuery",
+                    "VirtualProtect",
+                    "GetProcessHeap",
+                    "HeapAlloc",
+                    "HeapFree",
+                    "HeapReAlloc",
+                    "HeapSize",
+                    "RaiseException",
+                    "TlsAlloc",
+                    "TlsGetValue",
+                    "TlsSetValue",
+                    "TlsFree",
+                    "GetStdHandle",
+                    "WriteFile"
+                }
+            },
+            {
+                "ADVAPI32.dll",
+                {
+                    "RegOpenKeyExW",
+                    "RegQueryValueExW",
+                    "RegCloseKey",
+                    "GetUserNameW",
+                    "OpenProcessToken",
+                    "GetTokenInformation"
+                }
+            }
+        };
 
-        outImportDirRva = baseRva + descOffset;
-        outImportDirSize = static_cast<uint32_t>(descTotalSize);
-        outIatRva = baseRva + iatOffset;
-        outIatSize = static_cast<uint32_t>(thunkTotalSize);
+        // 1. Calculate layout offsets
+        size_t descCount = modules.size() + 1;
+        uint32_t descTotalSize = static_cast<uint32_t>(descCount * sizeof(IMAGE_IMPORT_DESCRIPTOR));
+
+        uint32_t currentOffset = descTotalSize;
+        if (currentOffset % 8 != 0) currentOffset += 8 - (currentOffset % 8);
+
+        std::vector<uint32_t> intOffsets(modules.size());
+        for (size_t m = 0; m < modules.size(); ++m) {
+            intOffsets[m] = currentOffset;
+            currentOffset += static_cast<uint32_t>((modules[m].functions.size() + 1) * sizeof(uint64_t));
+        }
+
+        uint32_t iatStartOffset = currentOffset;
+        std::vector<uint32_t> iatOffsets(modules.size());
+        for (size_t m = 0; m < modules.size(); ++m) {
+            iatOffsets[m] = currentOffset;
+            currentOffset += static_cast<uint32_t>((modules[m].functions.size() + 1) * sizeof(uint64_t));
+        }
+        uint32_t totalIatSize = currentOffset - iatStartOffset;
+
+        std::vector<uint32_t> dllNameOffsets(modules.size());
+        for (size_t m = 0; m < modules.size(); ++m) {
+            dllNameOffsets[m] = currentOffset;
+            currentOffset += static_cast<uint32_t>(modules[m].dllName.size() + 1);
+        }
+
+        std::vector<std::vector<uint32_t>> funcOffsets(modules.size());
+        for (size_t m = 0; m < modules.size(); ++m) {
+            funcOffsets[m].resize(modules[m].functions.size());
+            for (size_t f = 0; f < modules[m].functions.size(); ++f) {
+                if (currentOffset % 2 != 0) currentOffset++;
+                funcOffsets[m][f] = currentOffset;
+                currentOffset += static_cast<uint32_t>(2 + modules[m].functions[f].size() + 1);
+            }
+        }
+
+        while (currentOffset % 16 != 0) currentOffset++;
+        uint32_t totalBlobSize = currentOffset;
+
+        outBlob.assign(totalBlobSize, 0);
+
+        // 2. Populate IMAGE_IMPORT_DESCRIPTORs
+        auto* descriptors = reinterpret_cast<IMAGE_IMPORT_DESCRIPTOR*>(outBlob.data());
+        for (size_t m = 0; m < modules.size(); ++m) {
+            descriptors[m].OriginalFirstThunk = baseRva + intOffsets[m];
+            descriptors[m].TimeDateStamp = 0;
+            descriptors[m].ForwarderChain = 0;
+            descriptors[m].Name = baseRva + dllNameOffsets[m];
+            descriptors[m].FirstThunk = baseRva + iatOffsets[m];
+        }
+
+        // 3. Populate DLL name strings
+        for (size_t m = 0; m < modules.size(); ++m) {
+            memcpy(outBlob.data() + dllNameOffsets[m], modules[m].dllName.c_str(), modules[m].dllName.size() + 1);
+        }
+
+        // 4. Populate IMAGE_IMPORT_BY_NAME entries and INT / IAT thunk tables
+        for (size_t m = 0; m < modules.size(); ++m) {
+            auto* intTable = reinterpret_cast<uint64_t*>(outBlob.data() + intOffsets[m]);
+            auto* iatTable = reinterpret_cast<uint64_t*>(outBlob.data() + iatOffsets[m]);
+
+            for (size_t f = 0; f < modules[m].functions.size(); ++f) {
+                uint32_t fnRva = baseRva + funcOffsets[m][f];
+                intTable[f] = fnRva;
+                iatTable[f] = fnRva;
+
+                uint8_t* pNameEntry = outBlob.data() + funcOffsets[m][f];
+                *reinterpret_cast<uint16_t*>(pNameEntry) = 0; // Hint = 0
+                memcpy(pNameEntry + 2, modules[m].functions[f].c_str(), modules[m].functions[f].size() + 1);
+            }
+        }
+
+        outImportDirRva = baseRva;
+        outImportDirSize = descTotalSize;
+        outIatRva = baseRva + iatStartOffset;
+        outIatSize = totalIatSize;
 
         return true;
     }

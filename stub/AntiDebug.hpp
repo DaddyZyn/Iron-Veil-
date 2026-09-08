@@ -226,21 +226,27 @@ namespace IronVeil {
         }
 
         static bool CheckPeb() {
-            auto* peb = reinterpret_cast<uint8_t*>(__readgsqword(0x60));
+            auto* peb = DynamicResolver::GetPeb();
             if (!peb)
                 return false;
 
             if (peb[2] != 0)
                 return true;
 
-            uint32_t ntGlobalFlag = *reinterpret_cast<uint32_t*>(peb + 0xBC);
+            volatile size_t flagOffset = 0x5E;
+            flagOffset = flagOffset * 2; // 0xBC
+            uint32_t ntGlobalFlag = *reinterpret_cast<uint32_t*>(peb + flagOffset);
             if (ntGlobalFlag & 0x70)
                 return true;
 
-            auto* processHeap = *reinterpret_cast<uint8_t**>(peb + 0x30);
+            volatile size_t heapOffset = 0x18;
+            heapOffset = heapOffset * 2; // 0x30
+            auto* processHeap = *reinterpret_cast<uint8_t**>(peb + heapOffset);
             if (processHeap) {
-                uint32_t flags = *reinterpret_cast<uint32_t*>(processHeap + 0x70);
-                uint32_t forceFlags = *reinterpret_cast<uint32_t*>(processHeap + 0x74);
+                volatile size_t flgOff = 0x38;
+                flgOff *= 2; // 0x70
+                uint32_t flags = *reinterpret_cast<uint32_t*>(processHeap + flgOff);
+                uint32_t forceFlags = *reinterpret_cast<uint32_t*>(processHeap + flgOff + 4);
 
                 if (forceFlags != 0 || (flags & 0x40000060) != 0)
                     return true;
