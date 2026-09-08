@@ -400,10 +400,11 @@ namespace IronVeil {
                 return 0;
 
             const auto* p = static_cast<const uint8_t*>(funcPtr);
-            uint64_t h = 14695981039346656037ULL;
+            uint64_t h = 0x9E3779B97F4A7C15ULL;
+            const uint64_t mult = 0x5851F42D4C957F2DULL;
             for (size_t i = 0; i < length; ++i) {
                 h ^= p[i];
-                h *= 1099511628211ULL;
+                h *= mult;
             }
             return h;
         }
@@ -413,8 +414,12 @@ namespace IronVeil {
                 return false;
 
             const auto* p = static_cast<const uint8_t*>(funcPtr);
+            volatile uint8_t ccKey = 0x5A;
+            volatile uint8_t cdKey = 0x3F;
             for (size_t i = 0; i < length; ++i) {
-                if (p[i] == 0xCC || (p[i] == 0xCD && i + 1 < length && p[i + 1] == 0x03))
+                if ((p[i] ^ ccKey) == 0x96)
+                    return false;
+                if ((p[i] ^ cdKey) == 0xF2 && i + 1 < length && (p[i + 1] ^ cdKey) == 0x3C)
                     return false;
                 if (p[i] == 0xE9 || p[i] == 0xEB)
                     return false;

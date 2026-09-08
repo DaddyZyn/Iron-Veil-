@@ -499,7 +499,7 @@ namespace IronVeil {
 
         SecureZero(sessionKey, sizeof(sessionKey));
 
-        uint64_t runtimeCanary = __rdtsc() ^ static_cast<uint64_t>(imageBase * 0x100000001B3ULL);
+        uint64_t runtimeCanary = __rdtsc() ^ static_cast<uint64_t>(imageBase * 0x5851F42D4C957F2DULL);
         uint8_t tempKey[32];
         UnblindKey(config->blindedKey, config->keyCanary, tempKey);
         config->keyCanary = runtimeCanary;

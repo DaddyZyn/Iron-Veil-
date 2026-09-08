@@ -18,17 +18,17 @@ namespace IronVeil {
 
     void ChaCha20::Process(const uint8_t key[32], const uint8_t nonce[12], uint32_t counter, 
                            const uint8_t* input, uint8_t* output, size_t length) {
-        // De-signature ChaCha20 constants "expand 32-byte k" to prevent static Capa/YARA T1027 matches
-        volatile uint32_t mask0 = 0x5A827999;
-        volatile uint32_t mask1 = 0x6ED9EBA1;
-        volatile uint32_t mask2 = 0x8F1BBCDC;
-        volatile uint32_t mask3 = 0xCA62C1D6;
+        // De-signature ChaCha20 constants "expand 32-byte k" without using SHA-1 or MD5 constants
+        volatile uint32_t mask0 = 0x243F6A88;
+        volatile uint32_t mask1 = 0x85A308D3;
+        volatile uint32_t mask2 = 0x13198A2E;
+        volatile uint32_t mask3 = 0x03707344;
 
         const uint32_t constants[4] = {
-            0x3BF201FCu ^ mask0, // 0x61707865 ("expa")
-            0x5DF98FCFu ^ mask1, // 0x3320646e ("nd 3")
-            0xF67991EEu ^ mask2, // 0x79622d32 ("2-by")
-            0xA142A4A2u ^ mask3  // 0x6b206574 ("te k")
+            0x454F12EDu ^ mask0, // 0x61707865 ("expa")
+            0xB6836CBDu ^ mask1, // 0x3320646e ("nd 3")
+            0x6A7BA71Cu ^ mask2, // 0x79622d32 ("2-by")
+            0x68501630u ^ mask3  // 0x6b206574 ("te k")
         };
 
         const auto* k = reinterpret_cast<const uint32_t*>(key);
@@ -67,16 +67,21 @@ namespace IronVeil {
                 QuarterRound(workingState[3], workingState[4], workingState[9],  workingState[14]);
             }
 
+            auto* ks32 = reinterpret_cast<uint32_t*>(keyStream);
             for (int i = 0; i < 16; ++i) {
-                uint32_t res = workingState[i] + state[i];
-                keyStream[i * 4 + 0] = static_cast<uint8_t>(res & 0xFF);
-                keyStream[i * 4 + 1] = static_cast<uint8_t>((res >> 8) & 0xFF);
-                keyStream[i * 4 + 2] = static_cast<uint8_t>((res >> 16) & 0xFF);
-                keyStream[i * 4 + 3] = static_cast<uint8_t>((res >> 24) & 0xFF);
+                ks32[i] = workingState[i] + state[i];
             }
 
             size_t chunkSize = (std::min)(length - offset, static_cast<size_t>(64));
-            for (size_t b = 0; b < chunkSize; ++b) {
+            size_t qwords = chunkSize / 8;
+            auto* out64 = reinterpret_cast<uint64_t*>(output + offset);
+            const auto* in64 = reinterpret_cast<const uint64_t*>(input + offset);
+            const auto* ks64 = reinterpret_cast<const uint64_t*>(keyStream);
+
+            for (size_t q = 0; q < qwords; ++q) {
+                out64[q] = in64[q] ^ ks64[q];
+            }
+            for (size_t b = qwords * 8; b < chunkSize; ++b) {
                 output[offset + b] = input[offset + b] ^ keyStream[b];
             }
 

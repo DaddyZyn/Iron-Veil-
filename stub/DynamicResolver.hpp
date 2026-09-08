@@ -152,7 +152,7 @@ namespace IronVeil {
                     }
                     ansiName[len] = '\0';
 
-                    if (HashDJB2CaseInsensitive(ansiName) == nameHash) {
+                    if (HashDJB2CaseInsensitiveRuntime(ansiName) == nameHash) {
                         return baseAddress;
                     }
                 }
@@ -199,24 +199,37 @@ namespace IronVeil {
             if (dos->e_magic != IMAGE_DOS_SIGNATURE)
                 return nullptr;
 
-            auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+            volatile size_t lfaShift = 0x1E;
+            size_t lfaOff = lfaShift * 2; // 0x3C
+            int32_t ntOff = *reinterpret_cast<const int32_t*>(base + lfaOff);
+            auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + ntOff);
             if (nt->Signature != IMAGE_NT_SIGNATURE)
                 return nullptr;
 
-            auto& expDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-            if (expDir.VirtualAddress == 0)
+            volatile size_t expDirShift = 7;
+            size_t expDirOff = (1 << expDirShift) | 0x08; // 0x88
+            auto* pExpDir = reinterpret_cast<const IMAGE_DATA_DIRECTORY*>(reinterpret_cast<const uint8_t*>(nt) + expDirOff);
+            uint32_t expDirVa = pExpDir->VirtualAddress;
+            uint32_t expDirSz = pExpDir->Size;
+            if (expDirVa == 0)
                 return nullptr;
 
-            auto* exports = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(base + expDir.VirtualAddress);
-            if (ordinal < exports->Base || ordinal >= exports->Base + exports->NumberOfFunctions)
+            const auto* pExpBytes = base + expDirVa;
+            volatile size_t offBase = (1 << 4);            // 0x10
+            volatile size_t offNumFuncs = (1 << 4) | 0x04; // 0x14
+            volatile size_t offFuncs = (1 << 4) | 0x0C;    // 0x1C
+
+            uint32_t expBase = *reinterpret_cast<const uint32_t*>(pExpBytes + offBase);
+            uint32_t expNumFuncs = *reinterpret_cast<const uint32_t*>(pExpBytes + offNumFuncs);
+            if (ordinal < expBase || ordinal >= expBase + expNumFuncs)
                 return nullptr;
 
-            auto* functions = reinterpret_cast<uint32_t*>(base + exports->AddressOfFunctions);
-            uint32_t funcRva = functions[ordinal - exports->Base];
+            auto* functions = reinterpret_cast<const uint32_t*>(base + *reinterpret_cast<const uint32_t*>(pExpBytes + offFuncs));
+            uint32_t funcRva = functions[ordinal - expBase];
             if (funcRva == 0)
                 return nullptr;
 
-            if (funcRva >= expDir.VirtualAddress && funcRva < expDir.VirtualAddress + expDir.Size) {
+            if (funcRva >= expDirVa && funcRva < expDirVa + expDirSz) {
                 const char* forwarder = reinterpret_cast<const char*>(base + funcRva);
                 return ResolveForwarder(forwarder, depth + 1);
             }
@@ -258,9 +271,9 @@ namespace IronVeil {
             modWithDll[modLen + 3] = 'l';
             modWithDll[modLen + 4] = '\0';
 
-            HMODULE targetMod = FindModuleByHash(HashDJB2CaseInsensitive(modWithDll));
+            HMODULE targetMod = FindModuleByHash(HashDJB2CaseInsensitiveRuntime(modWithDll));
             if (!targetMod) {
-                targetMod = FindModuleByHash(HashDJB2CaseInsensitive(modName));
+                targetMod = FindModuleByHash(HashDJB2CaseInsensitiveRuntime(modName));
             }
 
             const char* funcPart = dot + 1;
@@ -275,23 +288,23 @@ namespace IronVeil {
                     }
                     return FindExportByOrdinal(targetMod, ord, depth);
                 } else {
-                    return FindExportByHash(targetMod, HashDJB2(funcPart), depth);
+                    return FindExportByHash(targetMod, HashDJB2Runtime(funcPart), depth);
                 }
             }
 
             if (*funcPart != '#') {
-                uint32_t fHash = HashDJB2(funcPart);
-                HMODULE hKb = FindModuleByHash(HashDJB2CaseInsensitive("kernelbase.dll"));
+                uint32_t fHash = HashDJB2Runtime(funcPart);
+                HMODULE hKb = FindModuleByHash(HashDJB2CaseInsensitiveRuntime("kernelbase.dll"));
                 if (hKb) {
                     FARPROC p = FindExportByHash(hKb, fHash, depth);
                     if (p) return p;
                 }
-                HMODULE hNt = FindModuleByHash(HashDJB2CaseInsensitive("ntdll.dll"));
+                HMODULE hNt = FindModuleByHash(HashDJB2CaseInsensitiveRuntime("ntdll.dll"));
                 if (hNt) {
                     FARPROC p = FindExportByHash(hNt, fHash, depth);
                     if (p) return p;
                 }
-                HMODULE hK32 = FindModuleByHash(HashDJB2CaseInsensitive("kernel32.dll"));
+                HMODULE hK32 = FindModuleByHash(HashDJB2CaseInsensitiveRuntime("kernel32.dll"));
                 if (hK32) {
                     FARPROC p = FindExportByHash(hK32, fHash, depth);
                     if (p) return p;
@@ -310,28 +323,41 @@ namespace IronVeil {
             if (dos->e_magic != IMAGE_DOS_SIGNATURE)
                 return nullptr;
 
-            auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
+            volatile size_t lfaShift = 0x1E;
+            size_t lfaOff = lfaShift * 2; // 0x3C
+            int32_t ntOff = *reinterpret_cast<const int32_t*>(base + lfaOff);
+            auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + ntOff);
             if (nt->Signature != IMAGE_NT_SIGNATURE)
                 return nullptr;
 
-            auto& expDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-            if (expDir.VirtualAddress == 0)
+            volatile size_t expDirShift = 7;
+            size_t expDirOff = (1 << expDirShift) | 0x08; // 0x88
+            auto* pExpDir = reinterpret_cast<const IMAGE_DATA_DIRECTORY*>(reinterpret_cast<const uint8_t*>(nt) + expDirOff);
+            uint32_t expDirVa = pExpDir->VirtualAddress;
+            uint32_t expDirSz = pExpDir->Size;
+            if (expDirVa == 0)
                 return nullptr;
 
-            auto* exports = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(base + expDir.VirtualAddress);
-            auto* names = reinterpret_cast<uint32_t*>(base + exports->AddressOfNames);
-            auto* ordinals = reinterpret_cast<uint16_t*>(base + exports->AddressOfNameOrdinals);
-            auto* functions = reinterpret_cast<uint32_t*>(base + exports->AddressOfFunctions);
+            const auto* pExpBytes = base + expDirVa;
+            volatile size_t offNames = (1 << 5);           // 0x20
+            volatile size_t offOrds  = (1 << 5) | 4;       // 0x24
+            volatile size_t offFuncs = (1 << 4) | 0x0C;    // 0x1C
+            volatile size_t offNumNames = (1 << 4) | 0x08; // 0x18
 
-            for (uint32_t i = 0; i < exports->NumberOfNames; ++i) {
+            uint32_t expNumNames = *reinterpret_cast<const uint32_t*>(pExpBytes + offNumNames);
+            auto* names = reinterpret_cast<const uint32_t*>(base + *reinterpret_cast<const uint32_t*>(pExpBytes + offNames));
+            auto* ordinals = reinterpret_cast<const uint16_t*>(base + *reinterpret_cast<const uint32_t*>(pExpBytes + offOrds));
+            auto* functions = reinterpret_cast<const uint32_t*>(base + *reinterpret_cast<const uint32_t*>(pExpBytes + offFuncs));
+
+            for (uint32_t i = 0; i < expNumNames; ++i) {
                 const char* name = reinterpret_cast<const char*>(base + names[i]);
-                if (HashDJB2(name) == funcHash) {
+                if (HashDJB2Runtime(name) == funcHash) {
                     uint16_t ord = ordinals[i];
                     uint32_t funcRva = functions[ord];
                     if (funcRva == 0)
                         return nullptr;
 
-                    if (funcRva >= expDir.VirtualAddress && funcRva < expDir.VirtualAddress + expDir.Size) {
+                    if (funcRva >= expDirVa && funcRva < expDirVa + expDirSz) {
                         const char* forwarder = reinterpret_cast<const char*>(base + funcRva);
                         return ResolveForwarder(forwarder, depth + 1);
                     }

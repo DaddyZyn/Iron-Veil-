@@ -63,10 +63,15 @@ namespace IronVeil {
             if (!pFunc) return false;
             const auto* b = static_cast<const uint8_t*>(pFunc);
 
-            if (b[0] == 0xE9 || b[0] == 0xCC)
+            volatile uint8_t ccKey = 0x5A;
+            if ((b[0] ^ ccKey) == 0x96) // 0xCC ^ 0x5A == 0x96
                 return true;
 
-            if (b[0] == 0xCD && b[1] == 0x03)
+            if (b[0] == 0xE9)
+                return true;
+
+            volatile uint8_t cdKey = 0x3F;
+            if ((b[0] ^ cdKey) == 0xF2 && (b[1] ^ cdKey) == 0x3C) // 0xCD ^ 0x3F == 0xF2, 0x03 ^ 0x3F == 0x3C
                 return true;
 
             if (b[0] == 0x48 && b[1] == 0xB8) {
@@ -121,7 +126,14 @@ namespace IronVeil {
             auto isHooked = [](const void* p) -> bool {
                 if (!p) return false;
                 const auto* b = static_cast<const uint8_t*>(p);
-                return (b[0] == 0xE9 || b[0] == 0xCC || (b[0] == 0xFF && b[1] == 0x25));
+                volatile uint8_t ccKey = 0x5A;
+                if ((b[0] ^ ccKey) == 0x96)
+                    return true;
+                if (b[0] == 0xE9)
+                    return true;
+                if (b[0] == 0xFF && b[1] == 0x25)
+                    return true;
+                return false;
             };
 
             #define CHK_SC(fn) if (isHooked(reinterpret_cast<const void*>(fn))) return true;
@@ -333,14 +345,14 @@ namespace IronVeil {
 
         static bool CheckTiming() {
             uint64_t minDelta = 0xFFFFFFFFFFFFFFFFULL;
-            volatile uint64_t hash = 0xCBF29CE484222325ULL;
+            volatile uint64_t dummy = 0x9E3779B97F4A7C15ULL;
 
             for (int sample = 0; sample < 10; ++sample) {
                 unsigned int aux = 0;
                 _mm_lfence();
                 uint64_t t1 = __rdtscp(&aux);
                 for (int i = 0; i < 32; ++i) {
-                    hash = (hash ^ (i * 0x5A)) * 0x100000001B3ULL;
+                    dummy = (dummy ^ (i * 0x5A)) * 0x5851F42D4C957F2DULL;
                 }
                 _mm_lfence();
                 uint64_t t2 = __rdtscp(&aux);
@@ -350,7 +362,7 @@ namespace IronVeil {
                 }
             }
 
-            if (minDelta > 250000 || hash == 0) return true;
+            if (minDelta > 250000 || dummy == 0) return true;
 
             uint32_t tick1 = *reinterpret_cast<volatile uint32_t*>(0x7FFE0320);
             for (volatile int k = 0; k < 5000; ++k);

@@ -79,41 +79,59 @@ namespace IronVeil {
     #pragma pack(pop)
 
     inline void BlindKey(const uint8_t* inKey, uint64_t canary, uint8_t* outBlindedKey) {
-#if defined(_MSC_VER)
-        #pragma loop(no_vector)
-#endif
-        for (size_t i = 0; i < 32; ++i) {
-            uint8_t cByte = static_cast<uint8_t>((canary >> ((i & 7) * 8)) & 0xFF);
-            outBlindedKey[i] = static_cast<uint8_t>(inKey[i] ^ cByte ^ static_cast<uint8_t>((i * 0x5A) + 0x33));
+        const auto* in64 = reinterpret_cast<const uint64_t*>(inKey);
+        auto* out64 = reinterpret_cast<uint64_t*>(outBlindedKey);
+        volatile uint64_t kMask = 0x5A335A335A335A33ULL;
+        for (int q = 0; q < 4; ++q) {
+            uint64_t qCanary = (canary << (q * 8)) | (canary >> (64 - (q * 8)));
+            out64[q] = in64[q] ^ qCanary ^ (kMask + (q * 0x1111111111111111ULL));
         }
     }
 
     inline void UnblindKey(const uint8_t* inBlindedKey, uint64_t canary, uint8_t* outKey) {
-#if defined(_MSC_VER)
-        #pragma loop(no_vector)
-#endif
-        for (size_t i = 0; i < 32; ++i) {
-            uint8_t cByte = static_cast<uint8_t>((canary >> ((i & 7) * 8)) & 0xFF);
-            outKey[i] = static_cast<uint8_t>(inBlindedKey[i] ^ cByte ^ static_cast<uint8_t>((i * 0x5A) + 0x33));
+        const auto* in64 = reinterpret_cast<const uint64_t*>(inBlindedKey);
+        auto* out64 = reinterpret_cast<uint64_t*>(outKey);
+        volatile uint64_t kMask = 0x5A335A335A335A33ULL;
+        for (int q = 0; q < 4; ++q) {
+            uint64_t qCanary = (canary << (q * 8)) | (canary >> (64 - (q * 8)));
+            out64[q] = in64[q] ^ qCanary ^ (kMask + (q * 0x1111111111111111ULL));
         }
     }
 
-    constexpr uint32_t HashDJB2(const char* str, uint32_t h = 5381) {
-        return (!*str) ? h : HashDJB2(str + 1, ((h << 5) + h) ^ static_cast<uint8_t>(*str));
+    constexpr uint32_t HASH_SEED = 0x7B92A415;
+
+    constexpr uint32_t HashDJB2(const char* str, uint32_t h = HASH_SEED) {
+        return (!*str) ? h : HashDJB2(str + 1, (((h << 5) | (h >> 27)) ^ static_cast<uint8_t>(*str)));
     }
 
-    constexpr uint32_t HashDJB2CaseInsensitive(const char* str, uint32_t h = 5381) {
-        return (!*str) ? h : HashDJB2CaseInsensitive(str + 1, ((h << 5) + h) ^ static_cast<uint8_t>(
+    constexpr uint32_t HashDJB2CaseInsensitive(const char* str, uint32_t h = HASH_SEED) {
+        return (!*str) ? h : HashDJB2CaseInsensitive(str + 1, (((h << 5) | (h >> 27)) ^ static_cast<uint8_t>(
             (*str >= 'A' && *str <= 'Z') ? (*str + 32) : *str
-        ));
+        )));
+    }
+
+    inline uint32_t HashDJB2Runtime(const char* str, uint32_t h = HASH_SEED) {
+        while (char c = *str++) {
+            h = ((h << 5) | (h >> 27)) ^ static_cast<uint8_t>(c);
+        }
+        return h;
+    }
+
+    inline uint32_t HashDJB2CaseInsensitiveRuntime(const char* str, uint32_t h = HASH_SEED) {
+        while (char c = *str++) {
+            uint8_t b = (c >= 'A' && c <= 'Z') ? static_cast<uint8_t>(c + 32) : static_cast<uint8_t>(c);
+            h = ((h << 5) | (h >> 27)) ^ b;
+        }
+        return h;
     }
 
     inline uint64_t HashFNV1a64(const void* data, size_t size) {
         const auto* ptr = static_cast<const uint8_t*>(data);
-        uint64_t h = 14695981039346656037ULL;
+        uint64_t h = 0x9E3779B97F4A7C15ULL;
+        const uint64_t mult = 0x5851F42D4C957F2DULL;
         for (size_t i = 0; i < size; ++i) {
             h ^= ptr[i];
-            h *= 1099511628211ULL;
+            h *= mult;
         }
         return h;
     }
