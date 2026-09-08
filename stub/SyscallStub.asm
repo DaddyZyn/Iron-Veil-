@@ -12,13 +12,13 @@ SyscallInvoke PROC
     sub rsp, 48h
 
     mov rax, [rsp + 80h]
-    mov [rsp + 28h], rax
+    mov [rsp + 20h], rax
     mov rax, [rsp + 88h]
-    mov [rsp + 30h], rax
+    mov [rsp + 28h], rax
     mov rax, [rsp + 90h]
-    mov [rsp + 38h], rax
+    mov [rsp + 30h], rax
     mov rax, [rsp + 98h]
-    mov [rsp + 40h], rax
+    mov [rsp + 38h], rax
 
     mov eax, ecx
 
@@ -29,6 +29,14 @@ SyscallInvoke PROC
     jmp finish_sys
 
 direct_sys:
+    mov rax, [rsp + 38h]
+    mov [rsp + 40h], rax
+    mov rax, [rsp + 30h]
+    mov [rsp + 38h], rax
+    mov rax, [rsp + 28h]
+    mov [rsp + 30h], rax
+    mov rax, [rsp + 20h]
+    mov [rsp + 28h], rax
     syscall
 
 finish_sys:

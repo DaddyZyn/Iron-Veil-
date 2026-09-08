@@ -6,34 +6,91 @@ extern "C" NTSTATUS SyscallInvoke(uint32_t ssn, uintptr_t gadget, ...);
 
 namespace IronVeil {
 
-    struct SyscallExportEntry {
-        uint32_t rva;
-        uint32_t hash;
-        uint32_t ssn;
-    };
-
     struct SyscallContext {
-        static constexpr size_t MAX_SYSCALL_ENTRIES = 256;
-        SyscallExportEntry entries[MAX_SYSCALL_ENTRIES];
-        size_t count;
         uintptr_t ntdllBase;
+        uintptr_t codeStart;
+        uintptr_t codeEnd;
         uintptr_t syscallGadget;
         bool initialized;
 
         int32_t GetSsnByHash(uint32_t zwHash) const {
-            for (size_t i = 0; i < count; ++i) {
-                if (entries[i].hash == zwHash) {
-                    return static_cast<int32_t>(entries[i].ssn);
+            HMODULE hNtdll = reinterpret_cast<HMODULE>(ntdllBase);
+            if (!hNtdll) {
+                constexpr uint32_t HASH_NTDLL = HashDJB2CaseInsensitive("ntdll.dll");
+                hNtdll = DynamicResolver::FindModuleByHash(HASH_NTDLL);
+                if (!hNtdll) return -1;
+            }
+
+            FARPROC pProc = DynamicResolver::FindExportByHash(hNtdll, zwHash);
+            if (!pProc) return -1;
+
+            const uint8_t* pFunc = reinterpret_cast<const uint8_t*>(pProc);
+
+            if (pFunc[0] == 0x4C && pFunc[1] == 0x8B && pFunc[2] == 0xD1 && pFunc[3] == 0xB8) {
+                return *reinterpret_cast<const int32_t*>(pFunc + 4);
+            }
+
+            constexpr int32_t STRIDE = 32;
+            constexpr int32_t MAX_STEPS = 64;
+
+            for (int32_t step = 1; step <= MAX_STEPS; ++step) {
+                const uint8_t* pDown = pFunc + (step * STRIDE);
+                if (codeEnd == 0 || (reinterpret_cast<uintptr_t>(pDown) + 32 <= codeEnd)) {
+                    if (pDown[0] == 0x4C && pDown[1] == 0x8B && pDown[2] == 0xD1 && pDown[3] == 0xB8) {
+                        int32_t neighborSsn = *reinterpret_cast<const int32_t*>(pDown + 4);
+                        return neighborSsn - step;
+                    }
+                }
+
+                const uint8_t* pUp = pFunc - (step * STRIDE);
+                if (codeStart == 0 || (reinterpret_cast<uintptr_t>(pUp) >= codeStart)) {
+                    if (pUp[0] == 0x4C && pUp[1] == 0x8B && pUp[2] == 0xD1 && pUp[3] == 0xB8) {
+                        int32_t neighborSsn = *reinterpret_cast<const int32_t*>(pUp + 4);
+                        return neighborSsn + step;
+                    }
                 }
             }
+
             return -1;
+        }
+
+        uintptr_t EnsureGadget() const {
+            if (syscallGadget != 0) return syscallGadget;
+            HMODULE hNtdll = reinterpret_cast<HMODULE>(ntdllBase);
+            if (!hNtdll) {
+                constexpr uint32_t HASH_NTDLL = HashDJB2CaseInsensitive("ntdll.dll");
+                hNtdll = DynamicResolver::FindModuleByHash(HASH_NTDLL);
+                if (!hNtdll) return 0;
+            }
+
+            constexpr uint32_t KNOWN_ZW_HASHES[] = {
+                HashDJB2("ZwProtectVirtualMemory"),
+                HashDJB2("ZwQueryInformationProcess"),
+                HashDJB2("ZwAllocateVirtualMemory"),
+                HashDJB2("ZwClose"),
+                HashDJB2("ZwSetInformationThread")
+            };
+
+            for (uint32_t h : KNOWN_ZW_HASHES) {
+                FARPROC p = DynamicResolver::FindExportByHash(hNtdll, h);
+                if (p) {
+                    const uint8_t* pBytes = reinterpret_cast<const uint8_t*>(p);
+                    for (size_t k = 0; k < 32; ++k) {
+                        if (pBytes[k] == 0x0F && pBytes[k + 1] == 0x05 && pBytes[k + 2] == 0xC3) {
+                            return reinterpret_cast<uintptr_t>(pBytes + k);
+                        }
+                    }
+                }
+            }
+            return 0;
         }
 
         NTSTATUS NtProtectVirtualMemory(HANDLE hProcess, PVOID* pBase, PSIZE_T pSize, ULONG newProtect, PULONG pOldProtect) const {
             constexpr uint32_t HASH_ZW = HashDJB2("ZwProtectVirtualMemory");
             int32_t ssn = GetSsnByHash(HASH_ZW);
             if (ssn < 0) return 0xC0000001;
-            return SyscallInvoke(static_cast<uint32_t>(ssn), syscallGadget, hProcess, pBase, pSize, 
+            uintptr_t gadget = EnsureGadget();
+            return SyscallInvoke(static_cast<uint32_t>(ssn), gadget, hProcess, pBase, pSize, 
                                  reinterpret_cast<PVOID>(static_cast<uintptr_t>(newProtect)), pOldProtect);
         }
 
@@ -41,7 +98,8 @@ namespace IronVeil {
             constexpr uint32_t HASH_ZW = HashDJB2("ZwQueryInformationProcess");
             int32_t ssn = GetSsnByHash(HASH_ZW);
             if (ssn < 0) return 0xC0000001;
-            return SyscallInvoke(static_cast<uint32_t>(ssn), syscallGadget, hProcess, 
+            uintptr_t gadget = EnsureGadget();
+            return SyscallInvoke(static_cast<uint32_t>(ssn), gadget, hProcess, 
                                  reinterpret_cast<PVOID>(static_cast<uintptr_t>(infoClass)), 
                                  pInfo, reinterpret_cast<PVOID>(static_cast<uintptr_t>(infoLen)), pRetLen);
         }
@@ -50,7 +108,8 @@ namespace IronVeil {
             constexpr uint32_t HASH_ZW = HashDJB2("ZwSetInformationThread");
             int32_t ssn = GetSsnByHash(HASH_ZW);
             if (ssn < 0) return 0xC0000001;
-            return SyscallInvoke(static_cast<uint32_t>(ssn), syscallGadget, hThread, 
+            uintptr_t gadget = EnsureGadget();
+            return SyscallInvoke(static_cast<uint32_t>(ssn), gadget, hThread, 
                                  reinterpret_cast<PVOID>(static_cast<uintptr_t>(infoClass)), 
                                  pInfo, reinterpret_cast<PVOID>(static_cast<uintptr_t>(infoLen)));
         }
@@ -59,7 +118,8 @@ namespace IronVeil {
             constexpr uint32_t HASH_ZW = HashDJB2("ZwQuerySystemInformation");
             int32_t ssn = GetSsnByHash(HASH_ZW);
             if (ssn < 0) return 0xC0000001;
-            return SyscallInvoke(static_cast<uint32_t>(ssn), syscallGadget, 
+            uintptr_t gadget = EnsureGadget();
+            return SyscallInvoke(static_cast<uint32_t>(ssn), gadget, 
                                  reinterpret_cast<PVOID>(static_cast<uintptr_t>(infoClass)), 
                                  pInfo, reinterpret_cast<PVOID>(static_cast<uintptr_t>(infoLen)), pRetLen);
         }
@@ -68,7 +128,8 @@ namespace IronVeil {
             constexpr uint32_t HASH_ZW = HashDJB2("ZwAllocateVirtualMemory");
             int32_t ssn = GetSsnByHash(HASH_ZW);
             if (ssn < 0) return 0xC0000001;
-            return SyscallInvoke(static_cast<uint32_t>(ssn), syscallGadget, hProcess, pBase, 
+            uintptr_t gadget = EnsureGadget();
+            return SyscallInvoke(static_cast<uint32_t>(ssn), gadget, hProcess, pBase, 
                                  reinterpret_cast<PVOID>(zeroBits), pSize, 
                                  reinterpret_cast<PVOID>(static_cast<uintptr_t>(allocType)), 
                                  reinterpret_cast<PVOID>(static_cast<uintptr_t>(protect)));
@@ -78,8 +139,9 @@ namespace IronVeil {
     class SyscallEngine {
     public:
         static bool Initialize(SyscallContext& ctx) {
-            ctx.count = 0;
             ctx.ntdllBase = 0;
+            ctx.codeStart = 0;
+            ctx.codeEnd = 0;
             ctx.syscallGadget = 0;
             ctx.initialized = false;
 
@@ -95,60 +157,34 @@ namespace IronVeil {
             auto* nt = reinterpret_cast<IMAGE_NT_HEADERS*>(base + dos->e_lfanew);
             if (nt->Signature != IMAGE_NT_SIGNATURE) return false;
 
-            auto& expDir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
-            if (expDir.VirtualAddress == 0) return false;
+            ctx.codeStart = ctx.ntdllBase + nt->OptionalHeader.BaseOfCode;
+            ctx.codeEnd = ctx.codeStart + nt->OptionalHeader.SizeOfCode;
 
-            auto* exports = reinterpret_cast<IMAGE_EXPORT_DIRECTORY*>(base + expDir.VirtualAddress);
-            auto* names = reinterpret_cast<uint32_t*>(base + exports->AddressOfNames);
-            auto* ordinals = reinterpret_cast<uint16_t*>(base + exports->AddressOfNameOrdinals);
-            auto* functions = reinterpret_cast<uint32_t*>(base + exports->AddressOfFunctions);
-
-            for (uint32_t i = 0; i < exports->NumberOfNames && ctx.count < SyscallContext::MAX_SYSCALL_ENTRIES; ++i) {
-                const char* name = reinterpret_cast<const char*>(base + names[i]);
-                if (name[0] == 'Z' && name[1] == 'w') {
-                    uint16_t ord = ordinals[i];
-                    uint32_t funcRva = functions[ord];
-                    if (funcRva != 0) {
-                        ctx.entries[ctx.count].rva = funcRva;
-                        ctx.entries[ctx.count].hash = HashDJB2(name);
-                        ctx.entries[ctx.count].ssn = 0;
-                        ctx.count++;
+            ctx.syscallGadget = ctx.EnsureGadget();
+            if (ctx.syscallGadget == 0) {
+                auto* sec = IMAGE_FIRST_SECTION(nt);
+                for (WORD s = 0; s < nt->FileHeader.NumberOfSections; ++s) {
+                    if ((sec[s].Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) {
+                        const uint8_t* pSec = base + sec[s].VirtualAddress;
+                        size_t secLen = sec[s].Misc.VirtualSize;
+                        for (size_t i = 0; i + 3 < secLen; ++i) {
+                            if (pSec[i] == 0x0F && pSec[i + 1] == 0x05 && pSec[i + 2] == 0xC3) {
+                                ctx.syscallGadget = reinterpret_cast<uintptr_t>(pSec + i);
+                                break;
+                            }
+                        }
+                        if (ctx.syscallGadget != 0) break;
                     }
                 }
             }
 
-            for (size_t i = 0; i < ctx.count; ++i) {
-                for (size_t j = i + 1; j < ctx.count; ++j) {
-                    if (ctx.entries[i].rva > ctx.entries[j].rva) {
-                        SyscallExportEntry temp = ctx.entries[i];
-                        ctx.entries[i] = ctx.entries[j];
-                        ctx.entries[j] = temp;
-                    }
-                }
-            }
-
-            for (size_t i = 0; i < ctx.count; ++i) {
-                ctx.entries[i].ssn = static_cast<uint32_t>(i);
-            }
-
-            for (size_t i = 0; i < ctx.count; ++i) {
-                const uint8_t* pCode = base + ctx.entries[i].rva;
-                for (size_t k = 0; k < 32; ++k) {
-                    if (pCode[k] == 0x0F && pCode[k + 1] == 0x05 && pCode[k + 2] == 0xC3) {
-                        ctx.syscallGadget = reinterpret_cast<uintptr_t>(pCode + k);
-                        break;
-                    }
-                }
-                if (ctx.syscallGadget != 0) break;
-            }
-
-            ctx.initialized = (ctx.count > 0);
+            ctx.initialized = (ctx.syscallGadget != 0);
             return ctx.initialized;
         }
 
         static bool ProtectMemory(const SyscallContext& ctx, const ResolvedApis& apis, 
                                   void* address, size_t size, DWORD newProtect, PDWORD oldProtect) {
-            if (ctx.initialized) {
+            if (ctx.initialized || ctx.ntdllBase != 0) {
                 PVOID base = address;
                 SIZE_T regionSize = size;
                 ULONG oldP = 0;

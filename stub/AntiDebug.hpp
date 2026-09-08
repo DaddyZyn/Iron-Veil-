@@ -221,6 +221,7 @@ namespace IronVeil {
 
         static bool CheckKernelDebugger(const ResolvedApis& apis) {
             SyscallContext sysCtx = { 0 };
+            SyscallEngine::Initialize(sysCtx);
             return CheckKernelDebugger(apis, sysCtx);
         }
 
@@ -289,6 +290,7 @@ namespace IronVeil {
 
         static bool CheckNtApi(const ResolvedApis& apis) {
             SyscallContext sysCtx = { 0 };
+            SyscallEngine::Initialize(sysCtx);
             return CheckNtApi(apis, sysCtx);
         }
 
@@ -364,6 +366,7 @@ namespace IronVeil {
 
         static void CloakCurrentThread(const ResolvedApis& apis) {
             SyscallContext sysCtx = { 0 };
+            SyscallEngine::Initialize(sysCtx);
             CloakCurrentThread(apis, sysCtx);
         }
 
