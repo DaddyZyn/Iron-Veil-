@@ -10,12 +10,14 @@ void PrintBanner() {
 void PrintUsage() {
     std::cout << "Usage: IronVeil.exe <input.exe> [output.exe] [options]\n\n"
               << "Options:\n"
-              << "  --no-encrypt-rdata    Do not encrypt .rdata constants section (encrypted by default)\n"
+              << "  --encrypt-rdata       Encrypt .rdata constants section (unencrypted by default for natural entropy)\n"
+              << "  --no-encrypt-rdata    Do not encrypt .rdata constants section (default)\n"
               << "  --no-pdata            Do not sanitize and dynamicize runtime unwind (.pdata) tables\n"
               << "  --no-antidebug        Disable all runtime anti-debugging checks\n"
               << "  --no-relocs           Do not preserve and process base relocations\n"
               << "  --no-tls              Do not process TLS callbacks\n"
-              << "  --section-name <str>  Custom name for the injected stub section (default: .rdata)\n"
+              << "  --veh-paging          Enable on-demand VEH guard-page decryption (disabled by default)\n"
+              << "  --section-name <str>  Custom name for the injected stub section (default: .text1)\n"
               << "  --help                Display this help menu\n\n";
 }
 

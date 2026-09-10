@@ -1,6 +1,8 @@
 #include "DynamicResolver.hpp"
 #include "AntiDebug.hpp"
 #include "../include/Encryptor.hpp"
+#define IRONVEIL_FREESTANDING 1
+#include "../include/IronVM.hpp"
 
 extern "C" {
     #pragma function(memset)
@@ -26,237 +28,47 @@ namespace IronVeil {
         while (len--) *p++ = 0;
     }
 
-    __declspec(noinline) static StubConfig* GetGuardConfig() {
-        uintptr_t scan = reinterpret_cast<uintptr_t>(&GetGuardConfig) & ~0xFFFULL;
-        for (int i = 0; i < 8; ++i) {
-            auto* testCfg = reinterpret_cast<StubConfig*>(scan);
-            if (testCfg->magic == STUB_MAGIC && testCfg->version == STUB_VERSION) {
-                return testCfg;
-            }
-            scan -= 0x1000;
-        }
-        return nullptr;
-    }
 
-    static BOOL WINAPI IronVeilVirtualProtectProxy(
-        LPVOID lpAddress,
-        SIZE_T dwSize,
-        DWORD flNewProtect,
-        PDWORD lpflOldProtect
-    ) {
-        auto* cfg = GetGuardConfig();
-        if (!cfg || !cfg->fnVirtualProtect) return FALSE;
 
-        auto pfnRealProtect = reinterpret_cast<t_VirtualProtect>(cfg->fnVirtualProtect);
-        auto pfnFlush = reinterpret_cast<t_FlushInstructionCache>(cfg->fnFlushInstructionCache);
 
-        uintptr_t imageBase = DynamicResolver::GetImageBase();
-        if (!imageBase || cfg->sectionCount == 0 || dwSize == 0 || !lpAddress) {
-            return pfnRealProtect(lpAddress, dwSize, flNewProtect, lpflOldProtect);
-        }
 
-        uintptr_t textStart = imageBase + cfg->sections[0].virtualAddress;
-        uintptr_t textEnd = textStart + cfg->sections[0].virtualSize;
+    extern "C" void StubEntryPoint();
 
-        uintptr_t targetStart = reinterpret_cast<uintptr_t>(lpAddress);
-        uintptr_t targetEnd = targetStart + dwSize;
+    extern "C" bool StubMainWorker(DispatchInfo* outDispatch) {
+        if (!outDispatch)
+            return false;
 
-        if (targetStart < textEnd && targetEnd > textStart) {
-            uintptr_t rangeStart = (targetStart > textStart) ? targetStart : textStart;
-            uintptr_t rangeEnd = (targetEnd < textEnd) ? targetEnd : textEnd;
-
-            uintptr_t firstPage = rangeStart & ~0xFFFULL;
-            uintptr_t lastPage = (rangeEnd > 0) ? ((rangeEnd - 1) & ~0xFFFULL) : firstPage;
-
-            for (uintptr_t pAddr = firstPage; pAddr <= lastPage; pAddr += 0x1000) {
-                size_t pageIdx = (pAddr - textStart) / 0x1000;
-                if (pageIdx < sizeof(cfg->vehPageDecrypted)) {
-                    if (!cfg->vehPageDecrypted[pageIdx]) {
-                        DWORD oldP = 0;
-                        if (pfnRealProtect(reinterpret_cast<LPVOID>(pAddr), 0x1000, PAGE_READWRITE, &oldP)) {
-                            uint8_t pageKey[32];
-                            UnblindKey(cfg->blindedKey, cfg->keyCanary, pageKey);
-                            uint32_t blockCounter = static_cast<uint32_t>(pageIdx * 64);
-                            ChaCha20::CryptInPlace(pageKey, cfg->sections[0].nonce, blockCounter,
-                                                   reinterpret_cast<uint8_t*>(pAddr), 0x1000);
-                            SecureZero(pageKey, sizeof(pageKey));
-                            cfg->vehPageDecrypted[pageIdx] = 1;
-                            pfnRealProtect(reinterpret_cast<LPVOID>(pAddr), 0x1000, oldP, &oldP);
-                            if (pfnFlush) {
-                                pfnFlush(reinterpret_cast<HANDLE>(static_cast<intptr_t>(-1)), reinterpret_cast<LPCVOID>(pAddr), 0x1000);
-                            }
-                        }
-                    }
-                    bool inActive = false;
-                    for (int i = 0; i < 4; ++i) {
-                        if (cfg->vehActivePages[i] == pAddr) { inActive = true; break; }
-                    }
-                    if (!inActive) {
-                        cfg->vehActivePages[cfg->vehRingHead] = pAddr;
-                        cfg->vehRingHead = (cfg->vehRingHead + 1) & 3;
-                    }
-                }
-            }
-        }
-
-        DWORD realOldProtect = 0;
-        BOOL res = pfnRealProtect(lpAddress, dwSize, flNewProtect, &realOldProtect);
-        if (res && lpflOldProtect) {
-            *lpflOldProtect = (realOldProtect & ~PAGE_GUARD);
-        }
-        return res;
-    }
-
-    static BOOL WINAPI IronVeilVirtualProtectExProxy(
-        HANDLE hProcess,
-        LPVOID lpAddress,
-        SIZE_T dwSize,
-        DWORD flNewProtect,
-        PDWORD lpflOldProtect
-    ) {
-        auto* cfg = GetGuardConfig();
-        if (!cfg || !cfg->fnVirtualProtect) return FALSE;
-
-        if (hProcess == reinterpret_cast<HANDLE>(static_cast<intptr_t>(-1))) {
-            return IronVeilVirtualProtectProxy(lpAddress, dwSize, flNewProtect, lpflOldProtect);
-        }
-
-        auto pfnRealProtect = reinterpret_cast<t_VirtualProtect>(cfg->fnVirtualProtect);
-        return pfnRealProtect(lpAddress, dwSize, flNewProtect, lpflOldProtect);
-    }
-
-    static LONG WINAPI IronVeilVehHandler(PEXCEPTION_POINTERS pEx) {
-        if (!pEx || !pEx->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
-
-        DWORD code = pEx->ExceptionRecord->ExceptionCode;
-        if (code != 0x80000001 && code != 0xC0000005) {
-            return EXCEPTION_CONTINUE_SEARCH;
-        }
-
-        if (pEx->ContextRecord) {
-            if (pEx->ContextRecord->Dr0 || pEx->ContextRecord->Dr1 || 
-                pEx->ContextRecord->Dr2 || pEx->ContextRecord->Dr3 || 
-                (pEx->ContextRecord->Dr7 & 0x55)) {
-                pEx->ContextRecord->Dr0 = 0;
-                pEx->ContextRecord->Dr1 = 0;
-                pEx->ContextRecord->Dr2 = 0;
-                pEx->ContextRecord->Dr3 = 0;
-                pEx->ContextRecord->Dr6 = 0;
-                pEx->ContextRecord->Dr7 = 0;
-            }
-        }
-
-        uintptr_t fault = (pEx->ExceptionRecord->NumberParameters >= 2) ?
-            static_cast<uintptr_t>(pEx->ExceptionRecord->ExceptionInformation[1]) :
-            reinterpret_cast<uintptr_t>(pEx->ExceptionRecord->ExceptionAddress);
-
-        auto* cfg = GetGuardConfig();
-        if (!cfg || !cfg->fnVirtualProtect) return EXCEPTION_CONTINUE_SEARCH;
-
-        uintptr_t imageBase = DynamicResolver::GetImageBase();
-        if (!imageBase) return EXCEPTION_CONTINUE_SEARCH;
-
-        uintptr_t textStart = imageBase + cfg->sections[0].virtualAddress;
-        uintptr_t textEnd = textStart + cfg->sections[0].virtualSize;
-
-        if (fault >= textStart && fault < textEnd) {
-            uintptr_t page = fault & ~0xFFFULL;
-            size_t pageIdx = (page - textStart) / 0x1000;
-            if (pageIdx >= sizeof(cfg->vehPageDecrypted)) {
-                return EXCEPTION_CONTINUE_SEARCH;
-            }
-
-            auto pfnProtect = reinterpret_cast<t_VirtualProtect>(cfg->fnVirtualProtect);
-            auto pfnFlush = reinterpret_cast<t_FlushInstructionCache>(cfg->fnFlushInstructionCache);
-
-            DWORD oldP = 0;
-
-            bool alreadyActive = false;
-            for (int i = 0; i < 4; ++i) {
-                if (cfg->vehActivePages[i] == page) {
-                    alreadyActive = true;
-                    break;
-                }
-            }
-
-            if (!alreadyActive) {
-                uintptr_t victim = cfg->vehActivePages[cfg->vehRingHead];
-                if (victim) {
-                    size_t victimIdx = (victim - textStart) / 0x1000;
-                    if (victimIdx < sizeof(cfg->vehPageDecrypted) && cfg->vehPageDecrypted[victimIdx]) {
-                        if (pfnProtect(reinterpret_cast<LPVOID>(victim), 0x1000, PAGE_READWRITE, &oldP)) {
-                            uint8_t prevKey[32];
-                            UnblindKey(cfg->blindedKey, cfg->keyCanary, prevKey);
-                            uint32_t prevBlock = static_cast<uint32_t>(victimIdx * 64);
-                            ChaCha20::CryptInPlace(prevKey, cfg->sections[0].nonce, prevBlock,
-                                                   reinterpret_cast<uint8_t*>(victim), 0x1000);
-                            SecureZero(prevKey, sizeof(prevKey));
-                            cfg->vehPageDecrypted[victimIdx] = 0;
-                        }
-                        pfnProtect(reinterpret_cast<LPVOID>(victim), 0x1000, 
-                                   PAGE_EXECUTE_READ | PAGE_GUARD, &oldP);
-                        if (pfnFlush) {
-                            pfnFlush(reinterpret_cast<HANDLE>(static_cast<intptr_t>(-1)), reinterpret_cast<LPCVOID>(victim), 0x1000);
-                        }
-                    }
-                }
-                cfg->vehActivePages[cfg->vehRingHead] = page;
-                cfg->vehRingHead = (cfg->vehRingHead + 1) & 3;
-            }
-
-            if (!cfg->vehPageDecrypted[pageIdx]) {
-                if (pfnProtect(reinterpret_cast<LPVOID>(page), 0x1000, PAGE_READWRITE, &oldP)) {
-                    uint8_t pageKey[32];
-                    UnblindKey(cfg->blindedKey, cfg->keyCanary, pageKey);
-                    uint32_t blockCounter = static_cast<uint32_t>(pageIdx * 64);
-                    ChaCha20::CryptInPlace(pageKey, cfg->sections[0].nonce, blockCounter, 
-                                           reinterpret_cast<uint8_t*>(page), 0x1000);
-                    SecureZero(pageKey, sizeof(pageKey));
-                    cfg->vehPageDecrypted[pageIdx] = 1;
-                }
-            }
-
-            DWORD targetProtect = PAGE_EXECUTE_READ;
-            if (code == 0xC0000005 && pEx->ExceptionRecord->NumberParameters >= 1 &&
-                pEx->ExceptionRecord->ExceptionInformation[0] == 1) {
-                targetProtect = PAGE_EXECUTE_READWRITE;
-            }
-
-            pfnProtect(reinterpret_cast<LPVOID>(page), 0x1000, targetProtect, &oldP);
-
-            if (pfnFlush) {
-                pfnFlush(reinterpret_cast<HANDLE>(static_cast<intptr_t>(-1)), reinterpret_cast<LPCVOID>(page), 0x1000);
-            }
-
-            return EXCEPTION_CONTINUE_EXECUTION;
-        }
-
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-
-    extern "C" __declspec(dllexport) uintptr_t StubMainWorker() {
+        uint64_t startTsc = __rdtsc();
         uintptr_t imageBase = DynamicResolver::GetImageBase();
         if (!imageBase)
-            return 0;
+            return false;
 
         auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(imageBase);
         if (dos->e_magic != IMAGE_DOS_SIGNATURE)
-            return 0;
+            return false;
 
         auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(imageBase + dos->e_lfanew);
         if (nt->Signature != IMAGE_NT_SIGNATURE)
-            return 0;
+            return false;
 
         auto* sections = IMAGE_FIRST_SECTION(nt);
-        auto* guardSec = &sections[nt->FileHeader.NumberOfSections - 1];
-
-        auto* config = reinterpret_cast<StubConfig*>(imageBase + guardSec->VirtualAddress);
-        if (config->magic != STUB_MAGIC || config->version != STUB_VERSION)
-            return 0;
+        uint32_t workerRva = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&StubMainWorker) - imageBase);
+        IMAGE_SECTION_HEADER* guardSec = nullptr;
+        StubConfig* config = nullptr;
+        for (uint16_t s = 0; s < nt->FileHeader.NumberOfSections; ++s) {
+            if (workerRva >= sections[s].VirtualAddress &&
+                workerRva < sections[s].VirtualAddress + sections[s].Misc.VirtualSize) {
+                guardSec = &sections[s];
+                config = reinterpret_cast<StubConfig*>(imageBase + guardSec->VirtualAddress);
+                break;
+            }
+        }
+        if (!config || !guardSec)
+            return false;
 
         ResolvedApis apis;
         if (!DynamicResolver::ResolveAll(apis))
-            return 0;
+            return false;
 
         SyscallContext sysCtx = { 0 };
         SyscallEngine::Initialize(sysCtx);
@@ -266,13 +78,19 @@ namespace IronVeil {
         config->fnVirtualProtect = reinterpret_cast<uintptr_t>(apis.VirtualProtect);
         config->fnFlushInstructionCache = reinterpret_cast<uintptr_t>(apis.FlushInstructionCache);
 
-        if (AntiDebug::PerformAllChecks(apis, sysCtx, config->antiDebugFlags)) {
-            apis.ExitProcess(0);
-            return 0;
+        uint32_t integrityMask = AntiDebug::GetIntegrityMask(config->antiDebugFlags, sysCtx, apis, reinterpret_cast<const void*>(&StubEntryPoint));
+        uint64_t effectiveCanary = config->keyCanary ^ (static_cast<uint64_t>(integrityMask) * 0x5851F42D4C957F2DULL);
+
+        if (config->vmBytecodeRva && config->vmBytecodeSize) {
+            const uint8_t* pVmCode = reinterpret_cast<const uint8_t*>(imageBase + config->vmBytecodeRva);
+            uint64_t vmVal = VM::VirtualMachine::Execute(pVmCode, config->vmBytecodeSize, config->vmKey, effectiveCanary);
+            if (vmVal != 0) {
+                effectiveCanary = vmVal;
+            }
         }
 
         uint8_t sessionKey[32];
-        UnblindKey(config->blindedKey, config->keyCanary, sessionKey);
+        UnblindKey(config->blindedKey, effectiveCanary, sessionKey);
 
         for (uint32_t i = 0; i < config->sectionCount; ++i) {
             const auto& sec = config->sections[i];
@@ -280,15 +98,30 @@ namespace IronVeil {
 
             DWORD oldProtect = 0;
             if (SyscallEngine::ProtectMemory(sysCtx, apis, pSection, sec.virtualSize, PAGE_READWRITE, &oldProtect)) {
-                ChaCha20::CryptInPlace(sessionKey, sec.nonce, 0, 
-                                       pSection, sec.rawSize);
+                if (sec.payloadSize > 0 && sec.payloadOffset > 0) {
+                    const uint8_t* pPayload = reinterpret_cast<const uint8_t*>(config) + sec.payloadOffset;
+                    ChaCha20::Process(sessionKey, sec.nonce, 0, pPayload, pSection, sec.payloadSize);
+                } else {
+                    ChaCha20::CryptInPlace(sessionKey, sec.nonce, 0, 
+                                           pSection, sec.rawSize);
+                }
 
-                if (i == 0 && config->textHash != 0) {
-                    uint64_t currentHash = HashFNV1a64(pSection, sec.rawSize);
-                    if (currentHash != config->textHash) {
-                        SecureZero(sessionKey, sizeof(sessionKey));
-                        apis.ExitProcess(0);
-                        return 0;
+                if (i == 0) {
+                    if (config->stolenLen == 0) {
+                        if (config->originalEntryPoint >= sec.virtualAddress &&
+                            config->originalEntryPoint + sizeof(config->originalEpBytes) <= sec.virtualAddress + sec.virtualSize) {
+                            memcpy(pSection + (config->originalEntryPoint - sec.virtualAddress),
+                                   config->originalEpBytes, sizeof(config->originalEpBytes));
+                        }
+                    }
+
+                    if (config->textHash != 0) {
+                        uint64_t currentHash = HashFNV1a64(pSection, sec.rawSize);
+                        if (currentHash != config->textHash) {
+                            SecureZero(sessionKey, sizeof(sessionKey));
+                            apis.ExitProcess(0);
+                            return false;
+                        }
                     }
                 }
             }
@@ -337,8 +170,7 @@ namespace IronVeil {
                         relocOffset += block->SizeOfBlock;
                     }
 
-                    memset(encRelocs, 0, config->relocTableSize);
-                    SyscallEngine::ProtectMemory(sysCtx, apis, encRelocs, config->relocTableSize, PAGE_NOACCESS, &oldProtect);
+                    SecureZero(encRelocs, config->relocTableSize);
                 }
             }
         }
@@ -352,6 +184,15 @@ namespace IronVeil {
                                        encImports, config->encryptedImportsSize);
 
                 size_t offset = 0;
+                uint32_t thunkIndex = 0;
+
+                DWORD thunkOldProtect = 0;
+                uint8_t* pThunkBase = nullptr;
+                if (config->thunkPoolRva != 0 && config->thunkPoolSize != 0) {
+                    pThunkBase = reinterpret_cast<uint8_t*>(imageBase + config->thunkPoolRva);
+                    SyscallEngine::ProtectMemory(sysCtx, apis, pThunkBase, config->thunkPoolSize, PAGE_READWRITE, &thunkOldProtect);
+                }
+
                 if (config->encryptedImportsSize >= sizeof(uint32_t)) {
                     uint32_t moduleCount = *reinterpret_cast<uint32_t*>(encImports + offset);
                     offset += sizeof(uint32_t);
@@ -393,21 +234,86 @@ namespace IronVeil {
                                 if (isOrdinal) {
                                     pFunc = apis.GetProcAddress(hMod, reinterpret_cast<LPCSTR>(static_cast<uintptr_t>(ordinal)));
                                 } else if (funcName) {
-                                    uint32_t fHash = HashDJB2(funcName);
-                                    if (fHash == HashDJB2("VirtualProtect")) {
-                                        pFunc = reinterpret_cast<FARPROC>(IronVeilVirtualProtectProxy);
-                                    } else if (fHash == HashDJB2("VirtualProtectEx")) {
-                                        pFunc = reinterpret_cast<FARPROC>(IronVeilVirtualProtectExProxy);
-                                    } else {
-                                        pFunc = apis.GetProcAddress(hMod, funcName);
-                                    }
+                                    pFunc = apis.GetProcAddress(hMod, funcName);
                                 }
 
                                 if (pFunc) {
                                     auto* iatEntry = reinterpret_cast<uintptr_t*>(imageBase + iatRva);
                                     DWORD iatOld = 0;
                                     SyscallEngine::ProtectMemory(sysCtx, apis, iatEntry, sizeof(uintptr_t), PAGE_READWRITE, &iatOld);
-                                    *iatEntry = reinterpret_cast<uintptr_t>(pFunc);
+
+                                    bool isCode = false;
+                                    auto* modBase = reinterpret_cast<const uint8_t*>(hMod);
+                                    auto* modDos = reinterpret_cast<const IMAGE_DOS_HEADER*>(modBase);
+                                    if (modDos && modDos->e_magic == IMAGE_DOS_SIGNATURE) {
+                                        auto* modNt = reinterpret_cast<const IMAGE_NT_HEADERS*>(modBase + modDos->e_lfanew);
+                                        if (modNt && modNt->Signature == IMAGE_NT_SIGNATURE) {
+                                            uint32_t fRva = static_cast<uint32_t>(reinterpret_cast<const uint8_t*>(pFunc) - modBase);
+                                            auto* modSecs = IMAGE_FIRST_SECTION(modNt);
+                                            for (uint16_t s = 0; s < modNt->FileHeader.NumberOfSections; ++s) {
+                                                if (fRva >= modSecs[s].VirtualAddress && fRva < modSecs[s].VirtualAddress + modSecs[s].Misc.VirtualSize) {
+                                                    isCode = (modSecs[s].Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if (isCode && pThunkBase && (thunkIndex * 32 + 32) <= config->thunkPoolSize) {
+                                        uint8_t* pThunk = pThunkBase + (thunkIndex * 32);
+
+                                        uint64_t rawTarget = reinterpret_cast<uint64_t>(pFunc);
+                                        uint64_t thunkKey = 0x5851F42D4C957F2DULL ^ (static_cast<uint64_t>(thunkIndex) * 0x9E3779B97F4A7C15ULL);
+
+                                        uint32_t mode = thunkIndex % 4;
+                                        if (mode == 0) {
+                                            uint64_t encTarget = rawTarget ^ thunkKey;
+                                            pThunk[0] = 0x49; pThunk[1] = 0xBA;
+                                            *reinterpret_cast<uint64_t*>(pThunk + 2) = encTarget;
+                                            pThunk[10] = 0x48; pThunk[11] = 0xB8;
+                                            *reinterpret_cast<uint64_t*>(pThunk + 12) = thunkKey;
+                                            pThunk[20] = 0x49; pThunk[21] = 0x31; pThunk[22] = 0xC2;
+                                            pThunk[23] = 0x41; pThunk[24] = 0xFF; pThunk[25] = 0xE2;
+                                            pThunk[26] = 0x48; pThunk[27] = 0x8D; pThunk[28] = 0x64; pThunk[29] = 0x24; pThunk[30] = 0x00;
+                                            pThunk[31] = 0x90;
+                                        } else if (mode == 1) {
+                                            uint64_t encTarget = rawTarget ^ thunkKey;
+                                            pThunk[0] = 0x49; pThunk[1] = 0xBB;
+                                            *reinterpret_cast<uint64_t*>(pThunk + 2) = encTarget;
+                                            pThunk[10] = 0x48; pThunk[11] = 0xB8;
+                                            *reinterpret_cast<uint64_t*>(pThunk + 12) = thunkKey;
+                                            pThunk[20] = 0x49; pThunk[21] = 0x31; pThunk[22] = 0xC3;
+                                            pThunk[23] = 0x41; pThunk[24] = 0xFF; pThunk[25] = 0xE3;
+                                            pThunk[26] = 0xF8; pThunk[27] = 0xFC;
+                                            pThunk[28] = 0x48; pThunk[29] = 0x85; pThunk[30] = 0xC0;
+                                            pThunk[31] = 0x90;
+                                        } else if (mode == 2) {
+                                            uint64_t encTarget = rawTarget + thunkKey;
+                                            pThunk[0] = 0x49; pThunk[1] = 0xBA;
+                                            *reinterpret_cast<uint64_t*>(pThunk + 2) = encTarget;
+                                            pThunk[10] = 0x48; pThunk[11] = 0xB8;
+                                            *reinterpret_cast<uint64_t*>(pThunk + 12) = thunkKey;
+                                            pThunk[20] = 0x49; pThunk[21] = 0x29; pThunk[22] = 0xC2;
+                                            pThunk[23] = 0x41; pThunk[24] = 0xFF; pThunk[25] = 0xE2;
+                                            pThunk[26] = 0x0F; pThunk[27] = 0x1F; pThunk[28] = 0x44; pThunk[29] = 0x00; pThunk[30] = 0x00;
+                                            pThunk[31] = 0x90;
+                                        } else {
+                                            uint64_t encTarget = rawTarget - thunkKey;
+                                            pThunk[0] = 0x49; pThunk[1] = 0xBB;
+                                            *reinterpret_cast<uint64_t*>(pThunk + 2) = encTarget;
+                                            pThunk[10] = 0x48; pThunk[11] = 0xB8;
+                                            *reinterpret_cast<uint64_t*>(pThunk + 12) = thunkKey;
+                                            pThunk[20] = 0x49; pThunk[21] = 0x01; pThunk[22] = 0xC3;
+                                            pThunk[23] = 0x41; pThunk[24] = 0xFF; pThunk[25] = 0xE3;
+                                            pThunk[26] = 0x66; pThunk[27] = 0x0F; pThunk[28] = 0x1F; pThunk[29] = 0x44; pThunk[30] = 0x00; pThunk[31] = 0x00;
+                                        }
+
+                                        *iatEntry = reinterpret_cast<uintptr_t>(pThunk);
+                                        thunkIndex++;
+                                    } else {
+                                        *iatEntry = reinterpret_cast<uintptr_t>(pFunc);
+                                    }
+
                                     SyscallEngine::ProtectMemory(sysCtx, apis, iatEntry, sizeof(uintptr_t), iatOld, &iatOld);
                                 }
                             }
@@ -415,8 +321,14 @@ namespace IronVeil {
                     }
                 }
 
-                memset(encImports, 0, config->encryptedImportsSize);
-                SyscallEngine::ProtectMemory(sysCtx, apis, encImports, config->encryptedImportsSize, PAGE_NOACCESS, &oldProtect);
+                if (pThunkBase && config->thunkPoolSize) {
+                    SyscallEngine::ProtectMemory(sysCtx, apis, pThunkBase, config->thunkPoolSize, PAGE_EXECUTE_READ, &thunkOldProtect);
+                    if (apis.FlushInstructionCache && apis.GetCurrentProcess) {
+                        apis.FlushInstructionCache(apis.GetCurrentProcess(), pThunkBase, config->thunkPoolSize);
+                    }
+                }
+
+                SecureZero(encImports, config->encryptedImportsSize);
             }
         }
 
@@ -436,8 +348,7 @@ namespace IronVeil {
                     }
                 }
 
-                memset(encTls, 0, tlsDataSize);
-                SyscallEngine::ProtectMemory(sysCtx, apis, encTls, tlsDataSize, PAGE_NOACCESS, &oldProtect);
+                SecureZero(encTls, tlsDataSize);
             }
         }
 
@@ -470,67 +381,49 @@ namespace IronVeil {
 
         uintptr_t realOep = imageBase + config->originalEntryPoint;
 
-        if (apis.AddVectoredExceptionHandler && config->sectionCount > 0) {
-            const auto& textSec = config->sections[0];
-            uint32_t pageCount = static_cast<uint32_t>((textSec.virtualSize + 0xFFF) / 0x1000);
-            memset(config->vehPageDecrypted, 0, sizeof(config->vehPageDecrypted));
-            memset(config->vehActivePages, 0, sizeof(config->vehActivePages));
-            config->vehRingHead = 0;
-
-            uintptr_t oepPage = realOep & ~0xFFFULL;
-            config->vehActivePages[0] = oepPage;
-            config->vehRingHead = 1;
-
-            for (uint32_t p = 0; p < pageCount && p < sizeof(config->vehPageDecrypted); ++p) {
-                uintptr_t pageAddr = imageBase + textSec.virtualAddress + (p * 0x1000);
-                if (pageAddr == oepPage) {
-                    config->vehPageDecrypted[p] = 1;
-                } else {
-                    uint32_t blockCounter = p * 64;
-                    DWORD oldP = 0;
-                    SyscallEngine::ProtectMemory(sysCtx, apis, reinterpret_cast<LPVOID>(pageAddr), 0x1000, PAGE_READWRITE, &oldP);
-                    ChaCha20::CryptInPlace(sessionKey, textSec.nonce, blockCounter, reinterpret_cast<uint8_t*>(pageAddr), 0x1000);
-                    SyscallEngine::ProtectMemory(sysCtx, apis, reinterpret_cast<LPVOID>(pageAddr), 0x1000, PAGE_EXECUTE_READ | PAGE_GUARD, &oldP);
-                }
+        if (config->textHash != 0 && config->sectionCount > 0) {
+            const auto& sec0 = config->sections[0];
+            const auto* pSection0 = reinterpret_cast<const uint8_t*>(imageBase + sec0.virtualAddress);
+            uint64_t finalHash = HashFNV1a64(pSection0, sec0.rawSize);
+            if (finalHash != config->textHash) {
+                SecureZero(sessionKey, sizeof(sessionKey));
+                apis.ExitProcess(0);
+                return false;
             }
-
-            apis.AddVectoredExceptionHandler(1, IronVeilVehHandler);
         }
 
         SecureZero(sessionKey, sizeof(sessionKey));
 
-        uint64_t runtimeCanary = __rdtsc() ^ static_cast<uint64_t>(imageBase * 0x5851F42D4C957F2DULL);
-        uint8_t tempKey[32];
-        UnblindKey(config->blindedKey, config->keyCanary, tempKey);
-        config->keyCanary = runtimeCanary;
-        BlindKey(tempKey, runtimeCanary, config->blindedKey);
-        SecureZero(tempKey, sizeof(tempKey));
-
-        if (config->antiDebugFlags & ANTIDEBUG_ANTI_DUMP) {
-            auto* dosHeader = reinterpret_cast<IMAGE_DOS_HEADER*>(imageBase);
-            if (dosHeader->e_magic == IMAGE_DOS_SIGNATURE && dosHeader->e_lfanew > 0) {
-                auto* ntHeaders = reinterpret_cast<IMAGE_NT_HEADERS64*>(imageBase + dosHeader->e_lfanew);
-                DWORD oldP = 0;
-                if (SyscallEngine::ProtectMemory(sysCtx, apis, reinterpret_cast<LPVOID>(imageBase), 4096, PAGE_READWRITE, &oldP)) {
-                    // Shred section headers and debug tables to thwart Scylla/PE-sieve/x64dbg dumping,
-                    // preserving DOS/NT signatures so MSVC CRT initialization doesn't fast-fail
-                    auto* secHeaders = IMAGE_FIRST_SECTION(ntHeaders);
-                    for (uint16_t s = 0; s < config->sectionCount; ++s) {
-                        memset(secHeaders[s].Name, 0, 8);
-                        secHeaders[s].PointerToRawData = 0;
-                        secHeaders[s].SizeOfRawData = 0;
-                    }
-                    SyscallEngine::ProtectMemory(sysCtx, apis, reinterpret_cast<LPVOID>(imageBase), 4096, oldP, &oldP);
-                }
-            }
-        }
-
+        SecureZero(config->blindedKey, sizeof(config->blindedKey));
         memset(config->importsNonce, 0, sizeof(config->importsNonce));
         memset(config->relocsNonce, 0, sizeof(config->relocsNonce));
         memset(config->tlsNonce, 0, sizeof(config->tlsNonce));
         memset(config->pdataNonce, 0, sizeof(config->pdataNonce));
+        config->keyCanary = 0;
+        config->textHash = 0;
 
-        return realOep;
+        DWORD hdrOldProtect = 0;
+        if (SyscallEngine::ProtectMemory(sysCtx, apis, reinterpret_cast<void*>(imageBase), 4096, PAGE_READWRITE, &hdrOldProtect)) {
+            auto* pSecHeaders = IMAGE_FIRST_SECTION(nt);
+            for (uint16_t s = 0; s < nt->FileHeader.NumberOfSections; ++s) {
+                memset(pSecHeaders[s].Name, 0, sizeof(pSecHeaders[s].Name));
+            }
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress = 0;
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size = 0;
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress = 0;
+            nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size = 0;
+
+            SyscallEngine::ProtectMemory(sysCtx, apis, reinterpret_cast<void*>(imageBase), 4096, hdrOldProtect, &hdrOldProtect);
+        }
+
+        uintptr_t targetOep = imageBase + (config->stolenLen > 0 ? config->stolenOep : config->originalEntryPoint);
+        uint64_t stackAdjust = config->stolenLen > 0 ? config->stolenStackAdjust : 0;
+
+        outDispatch->targetOep = targetOep;
+        outDispatch->stackAdjust = stackAdjust;
+        outDispatch->useVeh = 0;
+
+        return true;
     }
 
 }

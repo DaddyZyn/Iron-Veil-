@@ -18,8 +18,8 @@ add_library(IronVeilStub SHARED
     stub/StubMain.cpp
     src/Encryptor.cpp
 )
-target_compile_options(IronVeilStub PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W3 /O2 /GS- /Gy>)
-target_link_options(IronVeilStub PRIVATE /NODEFAULTLIB /ENTRY:StubEntryPoint /MERGE:.rdata=.text /MERGE:.data=.text)
+target_compile_options(IronVeilStub PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W3 /O2 /GS- /Gy /EHs- /EHc->)
+target_link_options(IronVeilStub PRIVATE /NODEFAULTLIB /ENTRY:StubEntryPoint /MERGE:.rdata=.text /MERGE:.data=.text /OPT:REF /OPT:ICF)
 
 add_executable(IronVeil
     src/main.cpp

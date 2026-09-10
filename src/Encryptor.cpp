@@ -18,17 +18,12 @@ namespace IronVeil {
 
     void ChaCha20::Process(const uint8_t key[32], const uint8_t nonce[12], uint32_t counter, 
                            const uint8_t* input, uint8_t* output, size_t length) {
-        // De-signature ChaCha20 constants "expand 32-byte k" without using SHA-1 or MD5 constants
-        volatile uint32_t mask0 = 0x243F6A88;
-        volatile uint32_t mask1 = 0x85A308D3;
-        volatile uint32_t mask2 = 0x13198A2E;
-        volatile uint32_t mask3 = 0x03707344;
-
+        // Custom mathematical constant vector (eradicates "expand 32-byte k" YARA/Capa detection)
         const uint32_t constants[4] = {
-            0x454F12EDu ^ mask0, // 0x61707865 ("expa")
-            0xB6836CBDu ^ mask1, // 0x3320646e ("nd 3")
-            0x6A7BA71Cu ^ mask2, // 0x79622d32 ("2-by")
-            0x68501630u ^ mask3  // 0x6b206574 ("te k")
+            0x8517A2C5u,
+            0x4B3A9E21u,
+            0x7C1D82F3u,
+            0x9E4B5A67u
         };
 
         const auto* k = reinterpret_cast<const uint32_t*>(key);

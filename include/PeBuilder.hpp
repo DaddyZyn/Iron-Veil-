@@ -8,7 +8,7 @@ namespace IronVeil {
 
     struct ProtectorOptions {
         bool encryptTextSection = true;
-        bool encryptRdataSection = true;
+        bool encryptRdataSection = false;
         bool sanitizePdata = true;
         bool wipeDebugDirectory = true;
         bool stripImports = true;
@@ -16,7 +16,7 @@ namespace IronVeil {
         bool handleRelocations = true;
         bool handleTlsCallbacks = true;
         uint32_t antiDebugFlags = ANTIDEBUG_ALL;
-        std::string sectionName = ".rdata";
+        std::string sectionName = ".text1";
     };
 
     class PeBuilder {
@@ -33,7 +33,10 @@ namespace IronVeil {
                                const std::vector<uint8_t>& encryptedRelocs,
                                const std::vector<uint8_t>& encryptedTls,
                                const std::vector<uint8_t>& encryptedPdata,
+                               const std::vector<uint8_t>& vmBytecode,
+                               const std::vector<uint8_t>& sectionPayloads,
                                const std::vector<uint8_t>& decoyImports,
+                               uint32_t thunkPoolSize,
                                uint32_t configAlignedSize,
                                uint32_t stubCodeAlignedSize,
                                std::vector<uint8_t>& outPayload,

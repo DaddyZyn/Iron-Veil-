@@ -2,45 +2,25 @@
 
 PUBLIC SyscallInvoke
 SyscallInvoke PROC
-    mov eax, ecx
+    test rdx, rdx
+    jz err_sys
+
     mov r11, rdx
     mov r10, r8
     mov rdx, r9
     mov r8, [rsp + 28h]
     mov r9, [rsp + 30h]
 
-    sub rsp, 48h
-
-    mov rax, [rsp + 80h]
-    mov [rsp + 20h], rax
-    mov rax, [rsp + 88h]
+    mov rax, [rsp + 38h]
     mov [rsp + 28h], rax
-    mov rax, [rsp + 90h]
+    mov rax, [rsp + 40h]
     mov [rsp + 30h], rax
-    mov rax, [rsp + 98h]
-    mov [rsp + 38h], rax
 
     mov eax, ecx
+    jmp r11
 
-    test r11, r11
-    jz direct_sys
-
-    call r11
-    jmp finish_sys
-
-direct_sys:
-    mov rax, [rsp + 38h]
-    mov [rsp + 40h], rax
-    mov rax, [rsp + 30h]
-    mov [rsp + 38h], rax
-    mov rax, [rsp + 28h]
-    mov [rsp + 30h], rax
-    mov rax, [rsp + 20h]
-    mov [rsp + 28h], rax
-    syscall
-
-finish_sys:
-    add rsp, 48h
+err_sys:
+    mov eax, 0C0000001h
     ret
 SyscallInvoke ENDP
 

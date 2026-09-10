@@ -3,7 +3,9 @@
 #include <windows.h>
 #include <cstdint>
 #include <cstddef>
+#ifndef IRONVEIL_FREESTANDING
 #include <vector>
+#endif
 #include <intrin.h>
 
 namespace IronVeil {
@@ -313,6 +315,7 @@ namespace VM {
         }
     };
 
+#ifndef IRONVEIL_FREESTANDING
     class BytecodeBuilder {
     public:
         BytecodeBuilder& Nop() {
@@ -491,6 +494,7 @@ namespace VM {
     private:
         std::vector<uint8_t> m_raw;
     };
+#endif
 
 }
 }

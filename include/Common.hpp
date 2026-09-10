@@ -13,27 +13,19 @@
 
 namespace IronVeil {
 
-    constexpr uint32_t STUB_MAGIC = 0x4C494556;
     constexpr uint32_t STUB_VERSION = 2;
 
     enum AntiDebugFlags : uint32_t {
         ANTIDEBUG_NONE               = 0,
         ANTIDEBUG_PEB                = (1 << 0),
-        ANTIDEBUG_NTAPI              = (1 << 1),
-        ANTIDEBUG_HARDWARE_BP        = (1 << 2),
-        ANTIDEBUG_TIMING_RDTSC       = (1 << 3),
-        ANTIDEBUG_THREAD_CLOAK       = (1 << 4),
-        ANTIDEBUG_INTEGRITY_WATCHDOG = (1 << 5),
-        ANTIDEBUG_HOOK_TAMPER        = (1 << 6),
-        ANTIDEBUG_KUSER_SHARED       = (1 << 7),
-        ANTIDEBUG_KERNEL_DEBUGGER    = (1 << 8),
-        ANTIDEBUG_SYSCALL_HOOKS      = (1 << 9),
-        ANTIDEBUG_NETWORK_HOOKS      = (1 << 10),
-        ANTIDEBUG_VM_MEMORY_HOOKS    = (1 << 11),
-        ANTIDEBUG_ANTI_DUMP          = (1 << 12),
-        ANTIDEBUG_HYPERVISOR         = (1 << 13),
-        ANTIDEBUG_PROCESS_DACL       = (1 << 14),
-        ANTIDEBUG_ALL                = 0x7FFF
+        ANTIDEBUG_HARDWARE_BP        = (1 << 1),
+        ANTIDEBUG_PROCESS_INFO       = (1 << 2),
+        ANTIDEBUG_THREAD_HIDE        = (1 << 3),
+        ANTIDEBUG_TIMING             = (1 << 4),
+        ANTIDEBUG_HOOK_SCAN          = (1 << 5),
+        ANTIDEBUG_KUSER              = (1 << 6),
+        ANTIDEBUG_ENTRY_INTEGRITY    = (1 << 7),
+        ANTIDEBUG_ALL                = 0xFFu
     };
 
     #pragma pack(push, 1)
@@ -44,12 +36,15 @@ namespace IronVeil {
         uint32_t originalProtect;
         uint32_t characteristics;
         uint8_t  nonce[12];
+        uint32_t payloadOffset;
+        uint32_t payloadSize;
     };
 
     struct StubConfig {
         uint32_t magic;
         uint32_t version;
         uint32_t originalEntryPoint;
+        uint8_t  originalEpBytes[16];
         uint64_t originalImageBase;
         uint32_t sectionCount;
         uint32_t encryptedImportsRva;
@@ -72,67 +67,82 @@ namespace IronVeil {
         ProtectedSectionInfo sections[16];
         uintptr_t fnVirtualProtect;
         uintptr_t fnFlushInstructionCache;
-        uintptr_t vehActivePages[4];
-        uint32_t  vehRingHead;
-        uint8_t   vehPageDecrypted[256];
+        uint32_t  stolenLen;
+        uint32_t  stolenOep;
+        uint64_t  stolenStackAdjust;
+        uint32_t  vmBytecodeRva;
+        uint32_t  vmBytecodeSize;
+        uint32_t  thunkPoolRva;
+        uint32_t  thunkPoolSize;
+        uint8_t   vmKey;
+        uint8_t   reserved[7];
     };
     #pragma pack(pop)
+
+    struct DispatchInfo {
+        uintptr_t targetOep;
+        uint64_t  stackAdjust;
+        uint64_t  useVeh;
+    };
 
     inline void BlindKey(const uint8_t* inKey, uint64_t canary, uint8_t* outBlindedKey) {
         const auto* in64 = reinterpret_cast<const uint64_t*>(inKey);
         auto* out64 = reinterpret_cast<uint64_t*>(outBlindedKey);
-        volatile uint64_t kMask = 0x5A335A335A335A33ULL;
-        for (int q = 0; q < 4; ++q) {
-            uint64_t qCanary = (canary << (q * 8)) | (canary >> (64 - (q * 8)));
-            out64[q] = in64[q] ^ qCanary ^ (kMask + (q * 0x1111111111111111ULL));
-        }
+        out64[0] = in64[0] ^ canary ^ 0x3F3E3D3C3B3A3938ULL;
+        out64[1] = in64[1] ^ (canary * 0x5851F42D4C957F2DULL + 1) ^ 0x7F7E7D7C7B7A7978ULL;
+        out64[2] = in64[2] ^ (canary * 0x14057B7EF767814FULL + 3) ^ 0xBFBEBDBCBBBAB9B8ULL;
+        out64[3] = in64[3] ^ (canary * 0x9E3779B97F4A7C15ULL + 5) ^ 0xFFFEFDFCFBFAF9F8ULL;
     }
 
     inline void UnblindKey(const uint8_t* inBlindedKey, uint64_t canary, uint8_t* outKey) {
         const auto* in64 = reinterpret_cast<const uint64_t*>(inBlindedKey);
         auto* out64 = reinterpret_cast<uint64_t*>(outKey);
-        volatile uint64_t kMask = 0x5A335A335A335A33ULL;
-        for (int q = 0; q < 4; ++q) {
-            uint64_t qCanary = (canary << (q * 8)) | (canary >> (64 - (q * 8)));
-            out64[q] = in64[q] ^ qCanary ^ (kMask + (q * 0x1111111111111111ULL));
-        }
+        out64[0] = in64[0] ^ canary ^ 0x3F3E3D3C3B3A3938ULL;
+        out64[1] = in64[1] ^ (canary * 0x5851F42D4C957F2DULL + 1) ^ 0x7F7E7D7C7B7A7978ULL;
+        out64[2] = in64[2] ^ (canary * 0x14057B7EF767814FULL + 3) ^ 0xBFBEBDBCBBBAB9B8ULL;
+        out64[3] = in64[3] ^ (canary * 0x9E3779B97F4A7C15ULL + 5) ^ 0xFFFEFDFCFBFAF9F8ULL;
     }
 
-    constexpr uint32_t HASH_SEED = 0x7B92A415;
-
-    constexpr uint32_t HashDJB2(const char* str, uint32_t h = HASH_SEED) {
-        return (!*str) ? h : HashDJB2(str + 1, (((h << 5) | (h >> 27)) ^ static_cast<uint8_t>(*str)));
+    constexpr uint32_t HashApi(const char* str, uint32_t h = 0x4B9E2B67u) {
+        return (!*str) ? h : HashApi(str + 1, (((h ^ static_cast<uint8_t>(*str)) * 0x5BD1E995u) ^ (h >> 15)));
     }
 
-    constexpr uint32_t HashDJB2CaseInsensitive(const char* str, uint32_t h = HASH_SEED) {
-        return (!*str) ? h : HashDJB2CaseInsensitive(str + 1, (((h << 5) | (h >> 27)) ^ static_cast<uint8_t>(
+    constexpr uint32_t HashApiCaseInsensitive(const char* str, uint32_t h = 0x4B9E2B67u) {
+        return (!*str) ? h : HashApiCaseInsensitive(str + 1, (((h ^ static_cast<uint8_t>(
             (*str >= 'A' && *str <= 'Z') ? (*str + 32) : *str
-        )));
+        )) * 0x5BD1E995u) ^ (h >> 15)));
     }
 
-    inline uint32_t HashDJB2Runtime(const char* str, uint32_t h = HASH_SEED) {
-        while (char c = *str++) {
-            h = ((h << 5) | (h >> 27)) ^ static_cast<uint8_t>(c);
-        }
-        return h;
-    }
+    constexpr uint32_t HASH_NTDLL_DLL                           = 0x1d118a95u;
+    constexpr uint32_t HASH_KERNEL32_DLL                        = 0x37cf1638u;
+    constexpr uint32_t HASH_KERNELBASE_DLL                      = 0xb40d1c98u;
 
-    inline uint32_t HashDJB2CaseInsensitiveRuntime(const char* str, uint32_t h = HASH_SEED) {
-        while (char c = *str++) {
-            uint8_t b = (c >= 'A' && c <= 'Z') ? static_cast<uint8_t>(c + 32) : static_cast<uint8_t>(c);
-            h = ((h << 5) | (h >> 27)) ^ b;
-        }
-        return h;
-    }
+    constexpr uint32_t HASH_VIRTUALPROTECT                      = 0x4b2061a7u;
+    constexpr uint32_t HASH_LOADLIBRARYA                        = 0x074dc1fbu;
+    constexpr uint32_t HASH_GETPROCADDRESS                      = 0xaee0ac7eu;
+    constexpr uint32_t HASH_EXITPROCESS                         = 0x8598dab3u;
+    constexpr uint32_t HASH_GETCURRENTPROCESS                   = 0x49e8e5c8u;
+    constexpr uint32_t HASH_FLUSHINSTRUCTIONCACHE               = 0xf32e945du;
+    constexpr uint32_t HASH_RTLADDFUNCTIONTABLE                 = 0x8ff0c6bbu;
+    constexpr uint32_t HASH_NTPROTECTVIRTUALMEMORY              = 0xdab35511u;
+    constexpr uint32_t HASH_NTQUERYINFORMATIONPROCESS          = 0x152bb40du;
+    constexpr uint32_t HASH_NTSETINFORMATIONTHREAD              = 0x5bd0f120u;
+    constexpr uint32_t HASH_NTALLOCATEVIRTUALMEMORY             = 0x4fff86cbu;
+    constexpr uint32_t HASH_RTLCAPTURECONTEXT                   = 0x7277bfd7u;
+    constexpr uint32_t HASH_GETCURRENTTHREAD                    = 0x61ca9e61u;
+    constexpr uint32_t HASH_RTLADDVECTOREDEXCEPTIONHANDLER      = 0x80910531u;
+    constexpr uint32_t HASH_RTLREMOVEVECTOREDEXCEPTIONHANDLER   = 0x4054d9e9u;
 
     inline uint64_t HashFNV1a64(const void* data, size_t size) {
         const auto* ptr = static_cast<const uint8_t*>(data);
-        uint64_t h = 0x9E3779B97F4A7C15ULL;
-        const uint64_t mult = 0x5851F42D4C957F2DULL;
+        uint64_t h = 0xA24BAED4963EE407ULL;
         for (size_t i = 0; i < size; ++i) {
-            h ^= ptr[i];
-            h *= mult;
+            h ^= static_cast<uint64_t>(ptr[i]);
+            h = (h ^ (h >> 27)) * 0x4CF5AD432745937FULL;
         }
+        h ^= h >> 33;
+        h *= 0xC2B2AE3D27D4EB4FULL;
+        h ^= h >> 29;
         return h;
     }
 

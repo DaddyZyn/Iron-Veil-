@@ -82,66 +82,44 @@ namespace IronVeil {
 
     struct ResolvedApis {
         t_VirtualProtect VirtualProtect = nullptr;
-        t_VirtualAlloc VirtualAlloc = nullptr;
-        t_VirtualQuery VirtualQuery = nullptr;
         t_LoadLibraryA LoadLibraryA = nullptr;
         t_GetProcAddress GetProcAddress = nullptr;
         t_ExitProcess ExitProcess = nullptr;
-        t_RtlAddFunctionTable RtlAddFunctionTable = nullptr;
-        t_AddVectoredExceptionHandler AddVectoredExceptionHandler = nullptr;
-        t_RemoveVectoredExceptionHandler RemoveVectoredExceptionHandler = nullptr;
         t_GetCurrentProcess GetCurrentProcess = nullptr;
         t_GetCurrentThread GetCurrentThread = nullptr;
-        t_GetThreadContext GetThreadContext = nullptr;
-        t_SetThreadContext SetThreadContext = nullptr;
         t_FlushInstructionCache FlushInstructionCache = nullptr;
+        t_RtlAddFunctionTable RtlAddFunctionTable = nullptr;
+        t_NtProtectVirtualMemory NtProtectVirtualMemory = nullptr;
         t_NtQueryInformationProcess NtQueryInformationProcess = nullptr;
         t_NtSetInformationThread NtSetInformationThread = nullptr;
-        t_NtQuerySystemInformation NtQuerySystemInformation = nullptr;
-        t_NtProtectVirtualMemory NtProtectVirtualMemory = nullptr;
-        t_NtAllocateVirtualMemory NtAllocateVirtualMemory = nullptr;
         t_RtlCaptureContext RtlCaptureContext = nullptr;
-
-        FARPROC pNtOpenProcess = nullptr;
-        FARPROC pNtCreateThreadEx = nullptr;
-        FARPROC pNtTerminateProcess = nullptr;
-        FARPROC pNtReadVirtualMemory = nullptr;
-        FARPROC pNtWriteVirtualMemory = nullptr;
-        FARPROC pLdrLoadDll = nullptr;
-        FARPROC pLdrGetProcedureAddress = nullptr;
+        t_AddVectoredExceptionHandler RtlAddVectoredExceptionHandler = nullptr;
+        t_RemoveVectoredExceptionHandler RtlRemoveVectoredExceptionHandler = nullptr;
     };
 
     class DynamicResolver {
     public:
         __forceinline static uint8_t* GetPeb() {
-            volatile unsigned long offset = 0x28;
-            offset += 0x38; // 0x60
-            return reinterpret_cast<uint8_t*>(__readgsqword(offset));
+            return reinterpret_cast<uint8_t*>(__readgsqword(0x60));
         }
 
         static uintptr_t GetImageBase() {
             auto* peb = GetPeb();
             if (!peb) return 0;
-            volatile size_t baseOffset = 0x08;
-            baseOffset <<= 1; // 0x10
-            return *reinterpret_cast<uintptr_t*>(peb + baseOffset);
+            return *reinterpret_cast<uintptr_t*>(peb + 0x10);
         }
 
         static HMODULE FindModuleByHash(uint32_t nameHash) {
             auto* peb = GetPeb();
             if (!peb) return nullptr;
-            volatile size_t ldrOffset = 0x0C;
-            ldrOffset <<= 1; // 0x18
-            auto* ldr = *reinterpret_cast<uint8_t**>(peb + ldrOffset);
+            auto* ldr = *reinterpret_cast<uint8_t**>(peb + sizeof(void*) * 3);
             if (!ldr) return nullptr;
-            volatile size_t listOffset = 0x10;
-            listOffset <<= 1; // 0x20
-            auto* head = reinterpret_cast<LIST_ENTRY*>(ldr + listOffset);
+            auto* head = reinterpret_cast<LIST_ENTRY*>(ldr + sizeof(void*) * 2);
 
-            for (auto* curr = head->Flink; curr != head; curr = curr->Flink) {
-                auto* entry = reinterpret_cast<uint8_t*>(curr) - 0x10;
-                auto* baseAddress = *reinterpret_cast<HMODULE*>(entry + 0x30);
-                auto* baseDllName = reinterpret_cast<UNICODE_STRING*>(entry + 0x58);
+            for (auto* curr = head->Flink; curr && curr != head; curr = curr->Flink) {
+                auto* entry = reinterpret_cast<uint8_t*>(curr);
+                auto* baseAddress = *reinterpret_cast<HMODULE*>(entry + sizeof(void*) * 6);
+                auto* baseDllName = reinterpret_cast<UNICODE_STRING*>(entry + sizeof(void*) * 11);
 
                 if (baseDllName && baseDllName->Buffer) {
                     char ansiName[128];
@@ -152,7 +130,7 @@ namespace IronVeil {
                     }
                     ansiName[len] = '\0';
 
-                    if (HashDJB2CaseInsensitiveRuntime(ansiName) == nameHash) {
+                    if (HashApiCaseInsensitive(ansiName) == nameHash) {
                         return baseAddress;
                     }
                 }
@@ -166,21 +144,17 @@ namespace IronVeil {
             auto* peb = GetPeb();
             if (!peb)
                 return false;
-            volatile size_t ldrOffset = 0x0C;
-            ldrOffset <<= 1; // 0x18
-            auto* ldr = *reinterpret_cast<uint8_t**>(peb + ldrOffset);
+            auto* ldr = *reinterpret_cast<uint8_t**>(peb + sizeof(void*) * 3);
             if (!ldr)
                 return false;
-            volatile size_t listOffset = 0x10;
-            listOffset <<= 1; // 0x20
-            auto* head = reinterpret_cast<LIST_ENTRY*>(ldr + listOffset);
+            auto* head = reinterpret_cast<LIST_ENTRY*>(ldr + sizeof(void*) * 2);
             if (!head)
                 return false;
 
             for (auto* curr = head->Flink; curr && curr != head; curr = curr->Flink) {
-                auto* entry = reinterpret_cast<uint8_t*>(curr) - 0x10;
-                uintptr_t base = *reinterpret_cast<uintptr_t*>(entry + 0x30);
-                uint32_t sizeOfImage = *reinterpret_cast<uint32_t*>(entry + 0x40);
+                auto* entry = reinterpret_cast<uint8_t*>(curr);
+                uintptr_t base = *reinterpret_cast<uintptr_t*>(entry + sizeof(void*) * 6);
+                uint32_t sizeOfImage = *reinterpret_cast<uint32_t*>(entry + sizeof(void*) * 8);
                 if (base && sizeOfImage) {
                     if (addr >= base && addr < base + sizeOfImage) {
                         return true;
@@ -271,9 +245,9 @@ namespace IronVeil {
             modWithDll[modLen + 3] = 'l';
             modWithDll[modLen + 4] = '\0';
 
-            HMODULE targetMod = FindModuleByHash(HashDJB2CaseInsensitiveRuntime(modWithDll));
+            HMODULE targetMod = FindModuleByHash(HashApiCaseInsensitive(modWithDll));
             if (!targetMod) {
-                targetMod = FindModuleByHash(HashDJB2CaseInsensitiveRuntime(modName));
+                targetMod = FindModuleByHash(HashApiCaseInsensitive(modName));
             }
 
             const char* funcPart = dot + 1;
@@ -288,23 +262,23 @@ namespace IronVeil {
                     }
                     return FindExportByOrdinal(targetMod, ord, depth);
                 } else {
-                    return FindExportByHash(targetMod, HashDJB2Runtime(funcPart), depth);
+                    return FindExportByHash(targetMod, HashApi(funcPart), depth);
                 }
             }
 
             if (*funcPart != '#') {
-                uint32_t fHash = HashDJB2Runtime(funcPart);
-                HMODULE hKb = FindModuleByHash(HashDJB2CaseInsensitiveRuntime("kernelbase.dll"));
+                uint32_t fHash = HashApi(funcPart);
+                HMODULE hKb = FindModuleByHash(HASH_KERNELBASE_DLL);
                 if (hKb) {
                     FARPROC p = FindExportByHash(hKb, fHash, depth);
                     if (p) return p;
                 }
-                HMODULE hNt = FindModuleByHash(HashDJB2CaseInsensitiveRuntime("ntdll.dll"));
+                HMODULE hNt = FindModuleByHash(HASH_NTDLL_DLL);
                 if (hNt) {
                     FARPROC p = FindExportByHash(hNt, fHash, depth);
                     if (p) return p;
                 }
-                HMODULE hK32 = FindModuleByHash(HashDJB2CaseInsensitiveRuntime("kernel32.dll"));
+                HMODULE hK32 = FindModuleByHash(HASH_KERNEL32_DLL);
                 if (hK32) {
                     FARPROC p = FindExportByHash(hK32, fHash, depth);
                     if (p) return p;
@@ -351,7 +325,7 @@ namespace IronVeil {
 
             for (uint32_t i = 0; i < expNumNames; ++i) {
                 const char* name = reinterpret_cast<const char*>(base + names[i]);
-                if (HashDJB2Runtime(name) == funcHash) {
+                if (HashApi(name) == funcHash) {
                     uint16_t ord = ordinals[i];
                     uint32_t funcRva = functions[ord];
                     if (funcRva == 0)
@@ -370,14 +344,10 @@ namespace IronVeil {
         }
 
         static bool ResolveAll(ResolvedApis& outApis) {
-            constexpr uint32_t HASH_KERNELBASE = HashDJB2CaseInsensitive("kernelbase.dll");
-            constexpr uint32_t HASH_KERNEL32   = HashDJB2CaseInsensitive("kernel32.dll");
-            constexpr uint32_t HASH_NTDLL      = HashDJB2CaseInsensitive("ntdll.dll");
-
-            HMODULE hKernelBase = FindModuleByHash(HASH_KERNELBASE);
-            HMODULE hKernel32 = FindModuleByHash(HASH_KERNEL32);
+            HMODULE hKernelBase = FindModuleByHash(HASH_KERNELBASE_DLL);
+            HMODULE hKernel32 = FindModuleByHash(HASH_KERNEL32_DLL);
             HMODULE hKMod = hKernelBase ? hKernelBase : hKernel32;
-            HMODULE hNtdll = FindModuleByHash(HASH_NTDLL);
+            HMODULE hNtdll = FindModuleByHash(HASH_NTDLL_DLL);
 
             if (!hKMod || !hNtdll)
                 return false;
@@ -391,74 +361,41 @@ namespace IronVeil {
             };
 
             outApis.VirtualProtect = reinterpret_cast<t_VirtualProtect>(
-                resolveK(HashDJB2("VirtualProtect")));
-            outApis.VirtualAlloc = reinterpret_cast<t_VirtualAlloc>(
-                resolveK(HashDJB2("VirtualAlloc")));
-            outApis.VirtualQuery = reinterpret_cast<t_VirtualQuery>(
-                resolveK(HashDJB2("VirtualQuery")));
+                resolveK(HASH_VIRTUALPROTECT));
             outApis.LoadLibraryA = reinterpret_cast<t_LoadLibraryA>(
-                resolveK(HashDJB2("LoadLibraryA")));
+                resolveK(HASH_LOADLIBRARYA));
             outApis.GetProcAddress = reinterpret_cast<t_GetProcAddress>(
-                resolveK(HashDJB2("GetProcAddress")));
+                resolveK(HASH_GETPROCADDRESS));
             outApis.ExitProcess = reinterpret_cast<t_ExitProcess>(
-                resolveK(HashDJB2("ExitProcess")));
+                resolveK(HASH_EXITPROCESS));
             outApis.GetCurrentProcess = reinterpret_cast<t_GetCurrentProcess>(
-                resolveK(HashDJB2("GetCurrentProcess")));
-            outApis.GetCurrentThread = reinterpret_cast<t_GetCurrentThread>(
-                resolveK(HashDJB2("GetCurrentThread")));
-            outApis.GetThreadContext = reinterpret_cast<t_GetThreadContext>(
-                resolveK(HashDJB2("GetThreadContext")));
-            outApis.SetThreadContext = reinterpret_cast<t_SetThreadContext>(
-                resolveK(HashDJB2("SetThreadContext")));
+                resolveK(HASH_GETCURRENTPROCESS));
             outApis.FlushInstructionCache = reinterpret_cast<t_FlushInstructionCache>(
-                resolveK(HashDJB2("FlushInstructionCache")));
-
-            outApis.AddVectoredExceptionHandler = reinterpret_cast<t_AddVectoredExceptionHandler>(
-                resolveK(HashDJB2("AddVectoredExceptionHandler")));
-            if (!outApis.AddVectoredExceptionHandler) {
-                outApis.AddVectoredExceptionHandler = reinterpret_cast<t_AddVectoredExceptionHandler>(
-                    FindExportByHash(hNtdll, HashDJB2("RtlAddVectoredExceptionHandler")));
-            }
-
-            outApis.RemoveVectoredExceptionHandler = reinterpret_cast<t_RemoveVectoredExceptionHandler>(
-                resolveK(HashDJB2("RemoveVectoredExceptionHandler")));
-            if (!outApis.RemoveVectoredExceptionHandler) {
-                outApis.RemoveVectoredExceptionHandler = reinterpret_cast<t_RemoveVectoredExceptionHandler>(
-                    FindExportByHash(hNtdll, HashDJB2("RtlRemoveVectoredExceptionHandler")));
-            }
+                resolveK(HASH_FLUSHINSTRUCTIONCACHE));
 
             outApis.RtlAddFunctionTable = reinterpret_cast<t_RtlAddFunctionTable>(
-                FindExportByHash(hNtdll, HashDJB2("RtlAddFunctionTable")));
+                FindExportByHash(hNtdll, HASH_RTLADDFUNCTIONTABLE));
             if (!outApis.RtlAddFunctionTable) {
                 outApis.RtlAddFunctionTable = reinterpret_cast<t_RtlAddFunctionTable>(
-                    resolveK(HashDJB2("RtlAddFunctionTable")));
+                    resolveK(HASH_RTLADDFUNCTIONTABLE));
             }
 
-            outApis.RtlCaptureContext = reinterpret_cast<t_RtlCaptureContext>(
-                FindExportByHash(hNtdll, HashDJB2("RtlCaptureContext")));
-            if (!outApis.RtlCaptureContext) {
-                outApis.RtlCaptureContext = reinterpret_cast<t_RtlCaptureContext>(
-                    resolveK(HashDJB2("RtlCaptureContext")));
-            }
+            outApis.GetCurrentThread = reinterpret_cast<t_GetCurrentThread>(
+                resolveK(HASH_GETCURRENTTHREAD));
 
-            outApis.NtQueryInformationProcess = reinterpret_cast<t_NtQueryInformationProcess>(
-                FindExportByHash(hNtdll, HashDJB2("NtQueryInformationProcess")));
-            outApis.NtSetInformationThread = reinterpret_cast<t_NtSetInformationThread>(
-                FindExportByHash(hNtdll, HashDJB2("NtSetInformationThread")));
-            outApis.NtQuerySystemInformation = reinterpret_cast<t_NtQuerySystemInformation>(
-                FindExportByHash(hNtdll, HashDJB2("NtQuerySystemInformation")));
             outApis.NtProtectVirtualMemory = reinterpret_cast<t_NtProtectVirtualMemory>(
-                FindExportByHash(hNtdll, HashDJB2("NtProtectVirtualMemory")));
-            outApis.NtAllocateVirtualMemory = reinterpret_cast<t_NtAllocateVirtualMemory>(
-                FindExportByHash(hNtdll, HashDJB2("NtAllocateVirtualMemory")));
+                FindExportByHash(hNtdll, HASH_NTPROTECTVIRTUALMEMORY));
+            outApis.NtQueryInformationProcess = reinterpret_cast<t_NtQueryInformationProcess>(
+                FindExportByHash(hNtdll, HASH_NTQUERYINFORMATIONPROCESS));
+            outApis.NtSetInformationThread = reinterpret_cast<t_NtSetInformationThread>(
+                FindExportByHash(hNtdll, HASH_NTSETINFORMATIONTHREAD));
+            outApis.RtlCaptureContext = reinterpret_cast<t_RtlCaptureContext>(
+                FindExportByHash(hNtdll, HASH_RTLCAPTURECONTEXT));
 
-            outApis.pNtOpenProcess = FindExportByHash(hNtdll, HashDJB2("NtOpenProcess"));
-            outApis.pNtCreateThreadEx = FindExportByHash(hNtdll, HashDJB2("NtCreateThreadEx"));
-            outApis.pNtTerminateProcess = FindExportByHash(hNtdll, HashDJB2("NtTerminateProcess"));
-            outApis.pNtReadVirtualMemory = FindExportByHash(hNtdll, HashDJB2("NtReadVirtualMemory"));
-            outApis.pNtWriteVirtualMemory = FindExportByHash(hNtdll, HashDJB2("NtWriteVirtualMemory"));
-            outApis.pLdrLoadDll = FindExportByHash(hNtdll, HashDJB2("LdrLoadDll"));
-            outApis.pLdrGetProcedureAddress = FindExportByHash(hNtdll, HashDJB2("LdrGetProcedureAddress"));
+            outApis.RtlAddVectoredExceptionHandler = reinterpret_cast<t_AddVectoredExceptionHandler>(
+                FindExportByHash(hNtdll, HASH_RTLADDVECTOREDEXCEPTIONHANDLER));
+            outApis.RtlRemoveVectoredExceptionHandler = reinterpret_cast<t_RemoveVectoredExceptionHandler>(
+                FindExportByHash(hNtdll, HASH_RTLREMOVEVECTOREDEXCEPTIONHANDLER));
 
             return (outApis.VirtualProtect && outApis.LoadLibraryA && outApis.GetProcAddress && outApis.ExitProcess);
         }

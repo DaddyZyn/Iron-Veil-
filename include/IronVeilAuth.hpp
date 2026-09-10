@@ -8,6 +8,7 @@
 #include <utility>
 #include <type_traits>
 #include <intrin.h>
+#include "Common.hpp"
 #include "IronVM.hpp"
 
 #define IV_NO_OPTIMIZE_BEGIN __pragma(optimize("", off))
@@ -294,9 +295,10 @@ namespace IronVeil {
         ScopedFunctionCrypt(void* funcPtr, size_t funcSize, uint8_t key = 0xAA)
             : m_ptr(funcPtr), m_size(funcSize), m_key(key) {
             if (m_ptr && m_size) {
-                DWORD oldP = 0;
-                if (VirtualProtect(m_ptr, m_size, PAGE_EXECUTE_READWRITE, &m_oldProtect)) {
+                if (VirtualProtect(m_ptr, m_size, PAGE_READWRITE, &m_oldProtect)) {
                     Transform();
+                    DWORD dummy = 0;
+                    VirtualProtect(m_ptr, m_size, m_oldProtect, &dummy);
                     FlushInstructionCache(GetCurrentProcess(), m_ptr, m_size);
                 }
             }
@@ -304,10 +306,12 @@ namespace IronVeil {
 
         ~ScopedFunctionCrypt() {
             if (m_ptr && m_size) {
-                Transform();
                 DWORD dummy = 0;
-                VirtualProtect(m_ptr, m_size, m_oldProtect, &dummy);
-                FlushInstructionCache(GetCurrentProcess(), m_ptr, m_size);
+                if (VirtualProtect(m_ptr, m_size, PAGE_READWRITE, &dummy)) {
+                    Transform();
+                    VirtualProtect(m_ptr, m_size, m_oldProtect, &dummy);
+                    FlushInstructionCache(GetCurrentProcess(), m_ptr, m_size);
+                }
             }
         }
 
@@ -332,7 +336,7 @@ namespace IronVeil {
                 return;
 
             DWORD oldP = 0;
-            if (VirtualProtect(funcPtr, length, PAGE_EXECUTE_READWRITE, &oldP)) {
+            if (VirtualProtect(funcPtr, length, PAGE_READWRITE, &oldP)) {
                 auto* p = static_cast<uint8_t*>(funcPtr);
                 for (size_t i = 0; i < length; ++i) {
                     p[i] ^= static_cast<uint8_t>(key + (i * 13));
@@ -399,14 +403,7 @@ namespace IronVeil {
             if (!funcPtr || length == 0)
                 return 0;
 
-            const auto* p = static_cast<const uint8_t*>(funcPtr);
-            uint64_t h = 0x9E3779B97F4A7C15ULL;
-            const uint64_t mult = 0x5851F42D4C957F2DULL;
-            for (size_t i = 0; i < length; ++i) {
-                h ^= p[i];
-                h *= mult;
-            }
-            return h;
+            return HashFNV1a64(funcPtr, length);
         }
 
         static bool VerifyFunctionIntegrity(const void* funcPtr, size_t length, uint64_t expectedHash) {
@@ -414,18 +411,21 @@ namespace IronVeil {
                 return false;
 
             const auto* p = static_cast<const uint8_t*>(funcPtr);
-            volatile uint8_t ccKey = 0x5A;
-            volatile uint8_t cdKey = 0x3F;
+            
+            // Check for entry detour hooks (JMP rel32, JMP rel8, JMP [rip], MOV RAX; JMP RAX)
+            if (p[0] == 0xE9 || p[0] == 0xEB)
+                return false;
+            if (length >= 6 && p[0] == 0xFF && p[1] == 0x25)
+                return false;
+            if (length >= 12 && p[0] == 0x48 && p[1] == 0xB8 && p[10] == 0xFF && p[11] == 0xE0)
+                return false;
+
+            constexpr uint8_t ccKey = 0x5A;
+            constexpr uint8_t cdKey = 0x3F;
             for (size_t i = 0; i < length; ++i) {
                 if ((p[i] ^ ccKey) == 0x96)
                     return false;
                 if ((p[i] ^ cdKey) == 0xF2 && i + 1 < length && (p[i + 1] ^ cdKey) == 0x3C)
-                    return false;
-                if (p[i] == 0xE9 || p[i] == 0xEB)
-                    return false;
-                if (p[i] == 0xFF && i + 1 < length && p[i + 1] == 0x25)
-                    return false;
-                if (p[i] == 0x48 && i + 1 < length && p[i + 1] == 0xB8 && i + 10 < length && p[i + 10] == 0xFF && p[i + 11] == 0xE0)
                     return false;
             }
 
