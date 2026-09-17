@@ -1,3 +1,5 @@
+# WORKING ON A NEW VERSION NOT SOME CRAPPY SLOP DONT USE CURRENT REPO
+
 # IronVeil
 
 A lightweight x64 PE protector / packer written in C++17 and MASM. 
